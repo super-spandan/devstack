@@ -25,6 +25,11 @@ set -o xtrace
 
 # set up default directories
 CINDER_DIR=$DEST/cinder
+if [ -d $CINDER_DIR/bin ] ; then
+    CINDER_BIN_DIR=$CINDER_DIR/bin
+else
+    CINDER_BIN_DIR=/usr/local/bin
+fi
 CINDERCLIENT_DIR=$DEST/python-cinderclient
 CINDER_CONF_DIR=/etc/cinder
 CINDER_CONF=$CINDER_CONF_DIR/cinder.conf
@@ -104,11 +109,26 @@ function configure_cinder() {
     iniset $CINDER_CONF DEFAULT volume_name_template ${VOLUME_NAME_PREFIX}%s
     iniset $CINDER_CONF DEFAULT iscsi_helper tgtadm
     iniset $CINDER_CONF DEFAULT sql_connection $BASE_SQL_CONN/cinder?charset=utf8
-    iniset $CINDER_CONF DEFAULT rabbit_host $RABBIT_HOST
-    iniset $CINDER_CONF DEFAULT rabbit_password $RABBIT_PASSWORD
     iniset $CINDER_CONF DEFAULT api_paste_config $CINDER_API_PASTE_INI
     iniset $CINDER_CONF DEFAULT root_helper "sudo ${CINDER_ROOTWRAP}"
+    iniset $CINDER_CONF DEFAULT osapi_volume_extension cinder.api.openstack.volume.contrib.standard_extensions
 
+    if is_service_enabled qpid ; then
+        iniset $CINDER_CONF DEFAULT rpc_backend cinder.openstack.common.rpc.impl_qpid
+    elif is_service_enabled zeromq; then
+        iniset $CINDER_CONF DEFAULT rpc_backend nova.openstack.common.rpc.impl_zmq
+    elif [ -n "$RABBIT_HOST" ] &&  [ -n "$RABBIT_PASSWORD" ]; then
+        iniset $CINDER_CONF DEFAULT rabbit_host $RABBIT_HOST
+        iniset $CINDER_CONF DEFAULT rabbit_password $RABBIT_PASSWORD
+    fi
+
+    if [ "$LOG_COLOR" == "True" ] && [ "$SYSLOG" == "False" ]; then
+        # Add color to logging output
+        iniset $CINDER_CONF DEFAULT logging_context_format_string "%(asctime)s %(color)s%(levelname)s %(name)s [[01;36m%(request_id)s [00;36m%(user_id)s %(project_id)s%(color)s] [01;35m%(instance)s%(color)s%(message)s[00m"
+        iniset $CINDER_CONF DEFAULT logging_default_format_string "%(asctime)s %(color)s%(levelname)s %(name)s [[00;36m-%(color)s] [01;35m%(instance)s%(color)s%(message)s[00m"
+        iniset $CINDER_CONF DEFAULT logging_debug_format_suffix "[00;33mfrom (pid=%(process)d) %(funcName)s %(pathname)s:%(lineno)d[00m"
+        iniset $CINDER_CONF DEFAULT logging_exception_prefix "%(color)s%(asctime)s TRACE %(name)s [01;35m%(instance)s[00m"
+    fi
 }
 
 # init_cinder() - Initialize database and volume group
@@ -122,7 +142,7 @@ function init_cinder() {
         mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'CREATE DATABASE cinder;'
 
         # (re)create cinder database
-        $CINDER_DIR/bin/cinder-manage db sync
+        $CINDER_BIN_DIR/cinder-manage db sync
     fi
 
     if is_service_enabled c-vol; then
@@ -186,9 +206,9 @@ function start_cinder() {
         fi
     fi
 
-    screen_it c-api "cd $CINDER_DIR && $CINDER_DIR/bin/cinder-api --config-file $CINDER_CONF"
-    screen_it c-vol "cd $CINDER_DIR && $CINDER_DIR/bin/cinder-volume --config-file $CINDER_CONF"
-    screen_it c-sch "cd $CINDER_DIR && $CINDER_DIR/bin/cinder-scheduler --config-file $CINDER_CONF"
+    screen_it c-api "cd $CINDER_DIR && $CINDER_BIN_DIR/cinder-api --config-file $CINDER_CONF"
+    screen_it c-vol "cd $CINDER_DIR && $CINDER_BIN_DIR/cinder-volume --config-file $CINDER_CONF"
+    screen_it c-sch "cd $CINDER_DIR && $CINDER_BIN_DIR/cinder-scheduler --config-file $CINDER_CONF"
 }
 
 # stop_cinder() - Stop running processes (non-screen)

@@ -6,7 +6,7 @@
 # mysql and rabbit are left running as OpenStack code refreshes
 # do not require them to be restarted.
 #
-# Stop all processes by setting UNSTACK_ALL or specifying ``--all``
+# Stop all processes by setting ``UNSTACK_ALL`` or specifying ``--all``
 # on the command line
 
 # Keep track of the current devstack directory.
@@ -37,7 +37,7 @@ fi
 
 # Swift runs daemons
 if is_service_enabled swift; then
-    swift-init all stop
+    swift-init all stop 2>/dev/null || true
 fi
 
 # Apache has the WSGI processes
@@ -54,13 +54,23 @@ if is_service_enabled cinder n-vol; then
         echo "iSCSI target cleanup needed:"
         echo "$TARGETS"
     fi
-    stop_service tgt
+
+    if [[ "$os_PACKAGE" = "deb" ]]; then
+        stop_service tgt
+    else
+        stop_service tgtd
+    fi
 fi
 
 if [[ -n "$UNSTACK_ALL" ]]; then
     # Stop MySQL server
     if is_service_enabled mysql; then
         stop_service mysql
+    fi
+
+    # Stop rabbitmq-server
+    if is_service_enabled rabbit; then
+        stop_service rabbitmq-server
     fi
 fi
 

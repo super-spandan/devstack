@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 # ``stack.sh`` is an opinionated OpenStack developer installation.  It
-# installs and configures various combinations of **Glance**, **Horizon**,
-# **Keystone**, **Melange**, **Nova**, **Quantum** and **Swift**
+# installs and configures various combinations of **Ceilometer**, **Cinder**,
+# **Glance**, **Heat**, **Horizon**, **Keystone**, **Nova**, **Quantum**
+# and **Swift**
 
 # This script allows you to specify configuration options of what git
 # repositories to use, enabled services, network configuration and various
@@ -10,13 +11,13 @@
 # shared settings for common resources (mysql, rabbitmq) and build a multi-node
 # developer install.
 
-# To keep this script simple we assume you are running on an **Ubuntu 11.10
-# Oneiric** or **Ubuntu 12.04 Precise** machine.  It should work in a VM or
-# physical server.  Additionally we put the list of ``apt`` and ``pip``
-# dependencies and other configuration files in this repo.  So start by
-# grabbing this script and the dependencies.
+# To keep this script simple we assume you are running on a recent **Ubuntu**
+# (11.10 Oneiric or 12.04 Precise) or **Fedora** (F16 or F17) machine.  It
+# should work in a VM or physical server.  Additionally we put the list of
+# ``apt`` and ``rpm`` dependencies and other configuration files in this repo.
 
 # Learn more and get the most recent version at http://devstack.org
+
 
 # Keep track of the devstack directory
 TOP_DIR=$(cd $(dirname "$0") && pwd)
@@ -47,28 +48,39 @@ GetDistro
 #     MYSQL_USER=hellaroot
 #
 # We try to have sensible defaults, so you should be able to run ``./stack.sh``
-# in most cases.
+# in most cases.  ``localrc`` is not distributed with DevStack and will never
+# be overwritten by a DevStack update.
 #
 # DevStack distributes ``stackrc`` which contains locations for the OpenStack
 # repositories and branches to configure.  ``stackrc`` sources ``localrc`` to
-# allow you to safely override those settings without being overwritten
-# when updating DevStack.
+# allow you to safely override those settings.
+
 if [[ ! -r $TOP_DIR/stackrc ]]; then
     echo "ERROR: missing $TOP_DIR/stackrc - did you grab more than just stack.sh?"
     exit 1
 fi
 source $TOP_DIR/stackrc
 
-# HTTP and HTTPS proxy servers are supported via the usual environment variables
-# ``http_proxy`` and ``https_proxy``.  They can be set in ``localrc`` if necessary
-# or on the command line::
+
+# Proxy Settings
+# --------------
+
+# HTTP and HTTPS proxy servers are supported via the usual environment variables [1]
+# ``http_proxy``, ``https_proxy`` and ``no_proxy``. They can be set in
+# ``localrc`` if necessary or on the command line::
 #
-#     http_proxy=http://proxy.example.com:3128/ ./stack.sh
+# [1] http://www.w3.org/Daemon/User/Proxies/ProxyClients.html
+#
+#     http_proxy=http://proxy.example.com:3128/ no_proxy=repo.example.net ./stack.sh
+
 if [[ -n "$http_proxy" ]]; then
     export http_proxy=$http_proxy
 fi
 if [[ -n "$https_proxy" ]]; then
     export https_proxy=$https_proxy
+fi
+if [[ -n "$no_proxy" ]]; then
+    export no_proxy=$no_proxy
 fi
 
 # Destination path for installation ``DEST``
@@ -93,6 +105,7 @@ if [[ ! ${DISTRO} =~ (oneiric|precise|quantal|f16|f17) ]]; then
     fi
 fi
 
+# Disallow qpid on oneiric
 if [ "${DISTRO}" = "oneiric" ] && is_service_enabled qpid ; then
     # Qpid was introduced in precise
     echo "You must use Ubuntu Precise or newer for Qpid support."
@@ -109,27 +122,43 @@ fi
 # ``stack.sh`` keeps function libraries here
 # Make sure ``$TOP_DIR/lib`` directory is present
 if [ ! -d $TOP_DIR/lib ]; then
-    echo "ERROR: missing devstack/lib - did you grab more than just stack.sh?"
+    echo "ERROR: missing devstack/lib"
     exit 1
 fi
 
-# stack.sh keeps the list of ``apt`` and ``pip`` dependencies in external
-# files, along with config templates and other useful files.  You can find these
-# in the ``files`` directory (next to this script).  We will reference this
-# directory using the ``FILES`` variable in this script.
+# ``stack.sh`` keeps the list of ``apt`` and ``rpm`` dependencies and config
+# templates and other useful files in the ``files`` subdirectory
 FILES=$TOP_DIR/files
 if [ ! -d $FILES ]; then
-    echo "ERROR: missing devstack/files - did you grab more than just stack.sh?"
+    echo "ERROR: missing devstack/files"
     exit 1
 fi
 
+SCREEN_NAME=${SCREEN_NAME:-stack}
 # Check to see if we are already running DevStack
-if type -p screen >/dev/null && screen -ls | egrep -q "[0-9].stack"; then
+if type -p screen >/dev/null && screen -ls | egrep -q "[0-9].$SCREEN_NAME"; then
     echo "You are already running a stack.sh session."
     echo "To rejoin this session type 'screen -x stack'."
-    echo "To destroy this session, kill the running screen."
+    echo "To destroy this session, type './unstack.sh'."
     exit 1
 fi
+
+# Make sure we only have one rpc backend enabled.
+rpc_backend_cnt=0
+for svc in qpid zeromq rabbit; do
+    is_service_enabled $svc &&
+        ((rpc_backend_cnt++))
+done
+if [ "$rpc_backend_cnt" -gt 1 ]; then
+    echo "ERROR: only one rpc backend may be enabled,"
+    echo "       set only one of 'rabbit', 'qpid', 'zeromq'"
+    echo "       via ENABLED_SERVICES."
+elif [ "$rpc_backend_cnt" == 0 ]; then
+    echo "ERROR: at least one rpc backend must be enabled,"
+    echo "       set one of 'rabbit', 'qpid', 'zeromq'"
+    echo "       via ENABLED_SERVICES."
+fi
+unset rpc_backend_cnt
 
 # Make sure we only have one volume service enabled.
 if is_service_enabled cinder && is_service_enabled n-vol; then
@@ -137,8 +166,12 @@ if is_service_enabled cinder && is_service_enabled n-vol; then
     exit 1
 fi
 
-# OpenStack is designed to be run as a regular user (Horizon will fail to run
-# as root, since apache refused to startup serve content from root user).  If
+
+# root Access
+# -----------
+
+# OpenStack is designed to be run as a non-root user; Horizon will fail to run
+# as **root** since Apache will not serve content from **root** user).  If
 # ``stack.sh`` is run as **root**, it automatically creates a **stack** user with
 # sudo privileges and runs as that user.
 
@@ -148,10 +181,9 @@ if [[ $EUID -eq 0 ]]; then
     echo "In $ROOTSLEEP seconds, we will create a user 'stack' and run as that user"
     sleep $ROOTSLEEP
 
-    # since this script runs as a normal user, we need to give that user
-    # ability to run sudo
+    # Give the non-root user the ability to run as **root** via ``sudo``
     if [[ "$os_PACKAGE" = "deb" ]]; then
-        dpkg -l sudo || apt_get update && install_package sudo
+        dpkg -l sudo || install_package sudo
     else
         rpm -qa | grep sudo || install_package sudo
     fi
@@ -165,7 +197,7 @@ if [[ $EUID -eq 0 ]]; then
     fi
 
     echo "Giving stack user passwordless sudo priviledges"
-    # some uec images sudoers does not have a '#includedir'. add one.
+    # UEC images ``/etc/sudoers`` does not have a ``#includedir``, add one
     grep -q "^#includedir.*/etc/sudoers.d" /etc/sudoers ||
         echo "#includedir /etc/sudoers.d" >> /etc/sudoers
     ( umask 226 && echo "stack ALL=(ALL) NOPASSWD:ALL" \
@@ -182,7 +214,7 @@ if [[ $EUID -eq 0 ]]; then
     fi
     exit 1
 else
-    # We're not root, make sure sudo is available
+    # We're not **root**, make sure ``sudo`` is available
     if [[ "$os_PACKAGE" = "deb" ]]; then
         CHECK_SUDO_CMD="dpkg -l sudo"
     else
@@ -190,7 +222,7 @@ else
     fi
     $CHECK_SUDO_CMD || die "Sudo is required.  Re-run stack.sh as root ONE TIME ONLY to set up sudo."
 
-    # UEC images /etc/sudoers does not have a '#includedir'. add one.
+    # UEC images ``/etc/sudoers`` does not have a ``#includedir``, add one
     sudo grep -q "^#includedir.*/etc/sudoers.d" /etc/sudoers ||
         echo "#includedir /etc/sudoers.d" | sudo tee -a /etc/sudoers
 
@@ -214,14 +246,14 @@ if [ ! -w $DEST ]; then
     sudo chown `whoami` $DEST
 fi
 
-# Set True to configure ``stack.sh`` to run cleanly without Internet access.
-# ``stack.sh`` must have been previously run with Internet access to install
-# prerequisites and initialize ``$DEST``.
+# Set ``OFFLINE`` to ``True`` to configure ``stack.sh`` to run cleanly without
+# Internet access. ``stack.sh`` must have been previously run with Internet
+# access to install prerequisites and fetch repositories.
 OFFLINE=`trueorfalse False $OFFLINE`
 
-# Set True to configure ``stack.sh`` to exit with an error code if it is asked
-# to clone any git repositories.  If devstack is used in a testing environment,
-# this may be used to ensure that the correct code is being tested.
+# Set ``ERROR_ON_CLONE`` to ``True`` to configure ``stack.sh`` to exit if
+# the destination git repository does not exist during the ``git_clone``
+# operation.
 ERROR_ON_CLONE=`trueorfalse False $ERROR_ON_CLONE`
 
 # Destination path for service data
@@ -230,13 +262,17 @@ sudo mkdir -p $DATA_DIR
 sudo chown `whoami` $DATA_DIR
 
 
-# Projects
-# --------
+# Configure Projects
+# ==================
 
 # Get project function libraries
 source $TOP_DIR/lib/cinder
+source $TOP_DIR/lib/n-vol
+source $TOP_DIR/lib/ceilometer
+source $TOP_DIR/lib/heat
+source $TOP_DIR/lib/quantum
 
-# Set the destination directories for openstack projects
+# Set the destination directories for OpenStack projects
 NOVA_DIR=$DEST/nova
 HORIZON_DIR=$DEST/horizon
 GLANCE_DIR=$DEST/glance
@@ -262,12 +298,14 @@ Q_PORT=${Q_PORT:-9696}
 # Default Quantum Host
 Q_HOST=${Q_HOST:-localhost}
 # Which Quantum API nova should use
-NOVA_USE_QUANTUM_API=${NOVA_USE_QUANTUM_API:-v1}
 # Default admin username
 Q_ADMIN_USERNAME=${Q_ADMIN_USERNAME:-quantum}
 # Default auth strategy
 Q_AUTH_STRATEGY=${Q_AUTH_STRATEGY:-keystone}
-
+# Use namespace or not
+Q_USE_NAMESPACE=${Q_USE_NAMESPACE:-True}
+# Meta data IP
+Q_META_DATA_IP=${Q_META_DATA_IP:-}
 
 # Default Melange Port
 M_PORT=${M_PORT:-9898}
@@ -290,17 +328,38 @@ VOLUME_GROUP=${VOLUME_GROUP:-stack-volumes}
 VOLUME_NAME_PREFIX=${VOLUME_NAME_PREFIX:-volume-}
 INSTANCE_NAME_PREFIX=${INSTANCE_NAME_PREFIX:-instance-}
 
-# Nova supports pluggable schedulers.  ``FilterScheduler`` should work in most
-# cases.
+# Nova supports pluggable schedulers.  The default ``FilterScheduler``
+# should work in most cases.
 SCHEDULER=${SCHEDULER:-nova.scheduler.filter_scheduler.FilterScheduler}
 
-HOST_IP_IFACE=${HOST_IP_IFACE:-eth0}
-# Use the eth0 IP unless an explicit is set by ``HOST_IP`` environment variable
+# Set fixed and floating range here so we can make sure not to use addresses
+# from either range when attempting to guess the IP to use for the host.
+# Note that setting FIXED_RANGE may be necessary when running DevStack
+# in an OpenStack cloud that uses eith of these address ranges internally.
+FIXED_RANGE=${FIXED_RANGE:-10.0.0.0/24}
+FLOATING_RANGE=${FLOATING_RANGE:-172.24.4.224/28}
+
+# Find the interface used for the default route
+HOST_IP_IFACE=${HOST_IP_IFACE:-$(ip route | sed -n '/^default/{ s/.*dev \(\w\+\)\s\+.*/\1/; p; }')}
+# Search for an IP unless an explicit is set by ``HOST_IP`` environment variable
 if [ -z "$HOST_IP" -o "$HOST_IP" == "dhcp" ]; then
-    HOST_IP=`LC_ALL=C ip -f inet addr show ${HOST_IP_IFACE} | awk '/inet/ {split($2,parts,"/");  print parts[1]}' | head -n1`
-    if [ "$HOST_IP" = "" ]; then
+    HOST_IP=""
+    HOST_IPS=`LC_ALL=C ip -f inet addr show ${HOST_IP_IFACE} | awk '/inet/ {split($2,parts,"/");  print parts[1]}'`
+    for IP in $HOST_IPS; do
+        # Attempt to filter out IP addresses that are part of the fixed and
+        # floating range. Note that this method only works if the ``netaddr``
+        # python library is installed. If it is not installed, an error
+        # will be printed and the first IP from the interface will be used.
+        # If that is not correct set ``HOST_IP`` in ``localrc`` to the correct
+        # address.
+        if ! (address_in_net $IP $FIXED_RANGE || address_in_net $IP $FLOATING_RANGE); then
+            HOST_IP=$IP
+            break;
+        fi
+    done
+    if [ "$HOST_IP" == "" ]; then
         echo "Could not determine host ip address."
-        echo "Either localrc specified dhcp on ${HOST_IP_IFACE} or defaulted to eth0"
+        echo "Either localrc specified dhcp on ${HOST_IP_IFACE} or defaulted"
         exit 1
     fi
 fi
@@ -316,7 +375,7 @@ SYSLOG=`trueorfalse False $SYSLOG`
 SYSLOG_HOST=${SYSLOG_HOST:-$HOST_IP}
 SYSLOG_PORT=${SYSLOG_PORT:-516}
 
-# Use color for logging output
+# Use color for logging output (only available if syslog is not used)
 LOG_COLOR=`trueorfalse True $LOG_COLOR`
 
 # Service startup timeout
@@ -372,7 +431,7 @@ function read_password {
 
 if [ "$VIRT_DRIVER" = 'xenserver' ]; then
     PUBLIC_INTERFACE_DEFAULT=eth3
-    # allow build_domU.sh to specify the flat network bridge via kernel args
+    # Allow ``build_domU.sh`` to specify the flat network bridge via kernel args
     FLAT_NETWORK_BRIDGE_DEFAULT=$(grep -o 'flat_network_bridge=[[:alnum:]]*' /proc/cmdline | cut -d= -f 2 | sort -u)
     GUEST_INTERFACE_DEFAULT=eth1
 else
@@ -382,11 +441,8 @@ else
 fi
 
 PUBLIC_INTERFACE=${PUBLIC_INTERFACE:-$PUBLIC_INTERFACE_DEFAULT}
-PUBLIC_INTERFACE=${PUBLIC_INTERFACE:-br100}
-FIXED_RANGE=${FIXED_RANGE:-10.0.0.0/24}
 FIXED_NETWORK_SIZE=${FIXED_NETWORK_SIZE:-256}
 NETWORK_GATEWAY=${NETWORK_GATEWAY:-10.0.0.1}
-FLOATING_RANGE=${FLOATING_RANGE:-172.24.4.224/28}
 NET_MAN=${NET_MAN:-FlatDHCPManager}
 EC2_DMZ_HOST=${EC2_DMZ_HOST:-$SERVICE_HOST}
 FLAT_NETWORK_BRIDGE=${FLAT_NETWORK_BRIDGE:-$FLAT_NETWORK_BRIDGE_DEFAULT}
@@ -397,47 +453,45 @@ VLAN_INTERFACE=${VLAN_INTERFACE:-$GUEST_INTERFACE_DEFAULT}
 TEST_FLOATING_POOL=${TEST_FLOATING_POOL:-test}
 TEST_FLOATING_RANGE=${TEST_FLOATING_RANGE:-192.168.253.0/29}
 
-# **MULTI_HOST** is a mode where each compute node runs its own network node.  This
+# ``MULTI_HOST`` is a mode where each compute node runs its own network node.  This
 # allows network operations and routing for a VM to occur on the server that is
 # running the VM - removing a SPOF and bandwidth bottleneck.
 MULTI_HOST=`trueorfalse False $MULTI_HOST`
 
-# If you are using FlatDHCP on multiple hosts, set the ``FLAT_INTERFACE``
-# variable but make sure that the interface doesn't already have an
-# ip or you risk breaking things.
+# If you are using the FlatDHCP network mode on multiple hosts, set the
+# ``FLAT_INTERFACE`` variable but make sure that the interface doesn't already
+# have an IP or you risk breaking things.
 #
 # **DHCP Warning**:  If your flat interface device uses DHCP, there will be a
 # hiccup while the network is moved from the flat interface to the flat network
 # bridge.  This will happen when you launch your first instance.  Upon launch
-# you will lose all connectivity to the node, and the vm launch will probably
+# you will lose all connectivity to the node, and the VM launch will probably
 # fail.
 #
 # If you are running on a single node and don't need to access the VMs from
-# devices other than that node, you can set the flat interface to the same
-# value as ``FLAT_NETWORK_BRIDGE``.  This will stop the network hiccup from
-# occurring.
-FLAT_INTERFACE=${FLAT_INTERFACE:-$GUEST_INTERFACE_DEFAULT}
+# devices other than that node, you can set FLAT_INTERFACE=
+# This will stop nova from bridging any interfaces into FLAT_NETWORK_BRIDGE.
+FLAT_INTERFACE=${FLAT_INTERFACE-$GUEST_INTERFACE_DEFAULT}
 
 ## FIXME(ja): should/can we check that FLAT_INTERFACE is sane?
 
 # Using Quantum networking:
 #
-# Make sure that quantum is enabled in ENABLED_SERVICES.  If it is the network
-# manager will be set to the QuantumManager.  If you want to run Quantum on
-# this host, make sure that q-svc is also in ENABLED_SERVICES.
-#
-# If you're planning to use the Quantum openvswitch plugin, set Q_PLUGIN to
-# "openvswitch" and make sure the q-agt service is enabled in
+# Make sure that quantum is enabled in ENABLED_SERVICES.  If you want
+# to run Quantum on this host, make sure that q-svc is also in
 # ENABLED_SERVICES.
 #
-# With Quantum networking the NET_MAN variable is ignored.
-
-# Using Melange IPAM:
+# If you're planning to use the Quantum openvswitch plugin, set
+# Q_PLUGIN to "openvswitch" and make sure the q-agt service is enabled
+# in ENABLED_SERVICES.  If you're planning to use the Quantum
+# linuxbridge plugin, set Q_PLUGIN to "linuxbridge" and make sure the
+# q-agt service is enabled in ENABLED_SERVICES.
 #
-# Make sure that quantum and melange are enabled in ENABLED_SERVICES.
-# If they are then the melange IPAM lib will be set in the QuantumManager.
-# Adding m-svc to ENABLED_SERVICES will start the melange service on this
-# host.
+# See "Quantum Network Configuration" below for additional variables
+# that must be set in localrc for connectivity across hosts with
+# Quantum.
+#
+# With Quantum networking the NET_MAN variable is ignored.
 
 
 # MySQL & (RabbitMQ or Qpid)
@@ -455,7 +509,7 @@ MYSQL_HOST=${MYSQL_HOST:-localhost}
 MYSQL_USER=${MYSQL_USER:-root}
 read_password MYSQL_PASSWORD "ENTER A PASSWORD TO USE FOR MYSQL."
 
-# NOTE: Don't specify /db in this string so we can use it for multiple services
+# NOTE: Don't specify ``/db`` in this string so we can use it for multiple services
 BASE_SQL_CONN=${BASE_SQL_CONN:-mysql://$MYSQL_USER:$MYSQL_PASSWORD@$MYSQL_HOST}
 
 # Rabbit connection info
@@ -463,6 +517,10 @@ if is_service_enabled rabbit; then
     RABBIT_HOST=${RABBIT_HOST:-localhost}
     read_password RABBIT_PASSWORD "ENTER A PASSWORD TO USE FOR RABBIT."
 fi
+
+
+# Glance
+# ------
 
 # Glance connection info.  Note the port must be specified.
 GLANCE_HOSTPORT=${GLANCE_HOSTPORT:-$SERVICE_HOST:9292}
@@ -473,19 +531,17 @@ GLANCE_HOSTPORT=${GLANCE_HOSTPORT:-$SERVICE_HOST:9292}
 
 # TODO: add logging to different location.
 
-# By default the location of swift drives and objects is located inside
-# the swift source directory. SWIFT_DATA_DIR variable allow you to redefine
-# this.
+# Set ``SWIFT_DATA_DIR`` to the location of swift drives and objects.
+# Default is the common DevStack data directory.
 SWIFT_DATA_DIR=${SWIFT_DATA_DIR:-${DEST}/data/swift}
 
-# We are going to have the configuration files inside the source
-# directory, change SWIFT_CONFIG_DIR if you want to adjust that.
+# Set ``SWIFT_CONFIG_DIR`` to the location of the configuration files.
+# Default is ``/etc/swift``.
 SWIFT_CONFIG_DIR=${SWIFT_CONFIG_DIR:-/etc/swift}
 
 # DevStack will create a loop-back disk formatted as XFS to store the
-# swift data. By default the disk size is 1 gigabyte. The variable
-# SWIFT_LOOPBACK_DISK_SIZE specified in bytes allow you to change
-# that.
+# swift data. Set ``SWIFT_LOOPBACK_DISK_SIZE`` to the disk size in bytes.
+# Default is 1 gigabyte.
 SWIFT_LOOPBACK_DISK_SIZE=${SWIFT_LOOPBACK_DISK_SIZE:-1000000}
 
 # The ring uses a configurable number of bits from a path’s MD5 hash as
@@ -498,7 +554,7 @@ SWIFT_LOOPBACK_DISK_SIZE=${SWIFT_LOOPBACK_DISK_SIZE:-1000000}
 # By default we define 9 for the partition count (which mean 512).
 SWIFT_PARTITION_POWER_SIZE=${SWIFT_PARTITION_POWER_SIZE:-9}
 
-# This variable allows you to configure how many replicas you want to be
+# Set ``SWIFT_REPLICAS`` to configure how many replicas are to be
 # configured for your Swift cluster.  By default the three replicas would need a
 # bit of IO and Memory on a VM you may want to lower that to 1 if you want to do
 # only some quick testing.
@@ -523,8 +579,8 @@ S3_SERVICE_PORT=${S3_SERVICE_PORT:-3333}
 # Keystone
 # --------
 
-# Service Token - Openstack components need to have an admin token
-# to validate user tokens.
+# The ``SERVICE_TOKEN`` is used to bootstrap the Keystone database.  It is
+# just a string and is not a 'real' Keystone token.
 read_password SERVICE_TOKEN "ENTER A SERVICE_TOKEN TO USE FOR THE SERVICE ADMIN TOKEN."
 # Services authenticate to Identity with servicename/SERVICE_PASSWORD
 read_password SERVICE_PASSWORD "ENTER A SERVICE_PASSWORD TO USE FOR THE SERVICE AUTHENTICATION."
@@ -556,10 +612,10 @@ APACHE_GROUP=${APACHE_GROUP:-$APACHE_USER}
 # Log files
 # ---------
 
-# Set up logging for stack.sh
-# Set LOGFILE to turn on logging
-# We append '.xxxxxxxx' to the given name to maintain history
-# where xxxxxxxx is a representation of the date the file was created
+# Set up logging for ``stack.sh``
+# Set ``LOGFILE`` to turn on logging
+# Append '.xxxxxxxx' to the given name to maintain history
+# where 'xxxxxxxx' is a representation of the date the file was created
 if [[ -n "$LOGFILE" || -n "$SCREEN_LOGDIR" ]]; then
     LOGDAYS=${LOGDAYS:-7}
     TIMESTAMP_FORMAT=${TIMESTAMP_FORMAT:-"%F-%H%M%S"}
@@ -567,7 +623,7 @@ if [[ -n "$LOGFILE" || -n "$SCREEN_LOGDIR" ]]; then
 fi
 
 if [[ -n "$LOGFILE" ]]; then
-    # First clean up old log files.  Use the user-specified LOGFILE
+    # First clean up old log files.  Use the user-specified ``LOGFILE``
     # as the template to search for, appending '.*' to match the date
     # we added on earlier runs.
     LOGDIR=$(dirname "$LOGFILE")
@@ -584,11 +640,11 @@ if [[ -n "$LOGFILE" ]]; then
 fi
 
 # Set up logging of screen windows
-# Set SCREEN_LOGDIR to turn on logging of screen windows to the
-# directory specified in SCREEN_LOGDIR, we will log to the the file
-# screen-$SERVICE_NAME-$TIMESTAMP.log in that dir and have a link
-# screen-$SERVICE_NAME.log to the latest log file.
-# Logs are kept for as long specified in LOGDAYS.
+# Set ``SCREEN_LOGDIR`` to turn on logging of screen windows to the
+# directory specified in ``SCREEN_LOGDIR``, we will log to the the file
+# ``screen-$SERVICE_NAME-$TIMESTAMP.log`` in that dir and have a link
+# ``screen-$SERVICE_NAME.log`` to the latest log file.
+# Logs are kept for as long specified in ``LOGDAYS``.
 if [[ -n "$SCREEN_LOGDIR" ]]; then
 
     # We make sure the directory is created.
@@ -600,8 +656,11 @@ if [[ -n "$SCREEN_LOGDIR" ]]; then
     fi
 fi
 
-# So that errors don't compound we exit on any errors so you see only the
-# first error that occurred.
+
+# Set Up Script Execution
+# -----------------------
+
+# Exit on any errors so that errors don't compound
 trap failed ERR
 failed() {
     local r=$?
@@ -618,11 +677,10 @@ set -o xtrace
 # Install Packages
 # ================
 
-# Openstack uses a fair number of other projects.
+# OpenStack uses a fair number of other projects.
 
 # Install package requirements
 if [[ "$os_PACKAGE" = "deb" ]]; then
-    apt_get update
     install_package $(get_packages $FILES/apts)
 else
     install_package $(get_packages $FILES/rpms)
@@ -645,6 +703,12 @@ elif is_service_enabled qpid; then
     else
         install_package qpidd
     fi
+elif is_service_enabled zeromq; then
+    if [[ "$os_PACKAGE" = "rpm" ]]; then
+        install_package zeromq python-zmq
+    else
+        install_package libzmq1 python-zmq
+    fi
 fi
 
 if is_service_enabled mysql; then
@@ -659,7 +723,7 @@ mysql-server-5.1 mysql-server/start_on_boot boolean true
 MYSQL_PRESEED
     fi
 
-    # while ``.my.cnf`` is not needed for openstack to function, it is useful
+    # while ``.my.cnf`` is not needed for OpenStack to function, it is useful
     # as it allows you to access the mysql databases via ``mysql nova`` instead
     # of having to specify the username/password each time.
     if [[ ! -e $HOME/.my.cnf ]]; then
@@ -673,14 +737,6 @@ EOF
     fi
     # Install mysql-server
     install_package mysql-server
-fi
-
-if is_service_enabled quantum; then
-    if [[ "$Q_PLUGIN" = "linuxbridge" ]]; then
-        # Install deps
-        # FIXME add to files/apts/quantum, but don't install if not needed!
-        install_package python-configobj
-    fi
 fi
 
 if is_service_enabled horizon; then
@@ -711,8 +767,6 @@ fi
 
 if is_service_enabled n-cpu; then
 
-    # Virtualization Configuration
-    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     if [[ "$os_PACKAGE" = "deb" ]]; then
         LIBVIRT_PKG_NAME=libvirt-bin
     else
@@ -755,7 +809,10 @@ fi
 # Install python requirements
 pip_install $(get_packages $FILES/pips | sort -u)
 
-# Check out OpenStack sources
+
+# Check Out Source
+# ----------------
+
 git_clone $NOVA_REPO $NOVA_DIR $NOVA_BRANCH
 
 # Check out the client libs that are used most
@@ -801,12 +858,8 @@ if is_service_enabled quantum; then
     # quantum
     git_clone $QUANTUM_REPO $QUANTUM_DIR $QUANTUM_BRANCH
 fi
-if is_service_enabled m-svc; then
-    # melange
-    git_clone $MELANGE_REPO $MELANGE_DIR $MELANGE_BRANCH
-fi
-if is_service_enabled melange; then
-    git_clone $MELANGECLIENT_REPO $MELANGECLIENT_DIR $MELANGECLIENT_BRANCH
+if is_service_enabled heat; then
+    install_heat
 fi
 if is_service_enabled cinder; then
     install_cinder
@@ -838,6 +891,7 @@ if is_service_enabled g-api n-api; then
 fi
 
 # Do this _after_ glance is installed to override the old binary
+# TODO(dtroyer): figure out when this is no longer necessary
 setup_develop $GLANCECLIENT_DIR
 
 setup_develop $NOVA_DIR
@@ -848,11 +902,8 @@ if is_service_enabled quantum; then
     setup_develop $QUANTUM_CLIENT_DIR
     setup_develop $QUANTUM_DIR
 fi
-if is_service_enabled m-svc; then
-    setup_develop $MELANGE_DIR
-fi
-if is_service_enabled melange; then
-    setup_develop $MELANGECLIENT_DIR
+if is_service_enabled heat; then
+    configure_heat
 fi
 if is_service_enabled cinder; then
     configure_cinder
@@ -869,6 +920,7 @@ if [[ $TRACK_DEPENDS = True ]] ; then
     echo "Ran stack.sh in depend tracking mode, bailing out now"
     exit 0
 fi
+
 
 # Syslog
 # ------
@@ -892,8 +944,8 @@ EOF
 fi
 
 
-# Rabbit or Qpid
-# --------------
+# Finalize queue instllation
+# --------------------------
 
 if is_service_enabled rabbit; then
     # Start rabbitmq-server
@@ -911,10 +963,9 @@ fi
 # Mysql
 # -----
 
-
 if is_service_enabled mysql; then
 
-    #start mysql-server
+    # Start mysql-server
     if [[ "$os_PACKAGE" = "rpm" ]]; then
         # RPM doesn't start the service
         start_service mysqld
@@ -953,51 +1004,11 @@ if [ -z "$SCREEN_HARDSTATUS" ]; then
     SCREEN_HARDSTATUS='%{= .} %-Lw%{= .}%> %n%f %t*%{= .}%+Lw%< %-=%{g}(%{d}%H/%l%{g})'
 fi
 
-# Our screenrc file builder
-function screen_rc {
-    SCREENRC=$TOP_DIR/stack-screenrc
-    if [[ ! -e $SCREENRC ]]; then
-        # Name the screen session
-        echo "sessionname stack" > $SCREENRC
-        # Set a reasonable statusbar
-        echo "hardstatus alwayslastline '$SCREEN_HARDSTATUS'" >> $SCREENRC
-        echo "screen -t stack bash" >> $SCREENRC
-    fi
-    # If this service doesn't already exist in the screenrc file
-    if ! grep $1 $SCREENRC 2>&1 > /dev/null; then
-        NL=`echo -ne '\015'`
-        echo "screen -t $1 bash" >> $SCREENRC
-        echo "stuff \"$2$NL\"" >> $SCREENRC
-    fi
-}
-
-# Our screen helper to launch a service in a hidden named screen
-function screen_it {
-    NL=`echo -ne '\015'`
-    if is_service_enabled $1; then
-        # Append the service to the screen rc file
-        screen_rc "$1" "$2"
-
-        screen -S stack -X screen -t $1
-        # sleep to allow bash to be ready to be send the command - we are
-        # creating a new window in screen and then sends characters, so if
-        # bash isn't running by the time we send the command, nothing happens
-        sleep 1.5
-
-        if [[ -n ${SCREEN_LOGDIR} ]]; then
-            screen -S stack -p $1 -X logfile ${SCREEN_LOGDIR}/screen-${1}.${CURRENT_LOG_TIME}.log
-            screen -S stack -p $1 -X log on
-            ln -sf ${SCREEN_LOGDIR}/screen-${1}.${CURRENT_LOG_TIME}.log ${SCREEN_LOGDIR}/screen-${1}.log
-        fi
-        screen -S stack -p $1 -X stuff "$2$NL"
-    fi
-}
-
 # Create a new named screen to run processes in
-screen -d -m -S stack -t stack -s /bin/bash
+screen -d -m -S $SCREEN_NAME -t shell -s /bin/bash
 sleep 1
 # Set a reasonable statusbar
-screen -r stack -X hardstatus alwayslastline "$SCREEN_HARDSTATUS"
+screen -r $SCREEN_NAME -X hardstatus alwayslastline "$SCREEN_HARDSTATUS"
 
 
 # Horizon
@@ -1037,7 +1048,8 @@ if is_service_enabled horizon; then
         APACHE_CONF=conf.d/horizon.conf
         sudo sed '/^Listen/s/^.*$/Listen 0.0.0.0:80/' -i /etc/httpd/conf/httpd.conf
     fi
-    ## Configure apache to run horizon
+
+    # Configure apache to run horizon
     sudo sh -c "sed -e \"
         s,%USER%,$APACHE_USER,g;
         s,%GROUP%,$APACHE_GROUP,g;
@@ -1045,6 +1057,7 @@ if is_service_enabled horizon; then
         s,%APACHE_NAME%,$APACHE_NAME,g;
         s,%DEST%,$DEST,g;
     \" $FILES/apache-horizon.template >/etc/$APACHE_NAME/$APACHE_CONF"
+
     restart_service $APACHE_NAME
 fi
 
@@ -1058,12 +1071,16 @@ if is_service_enabled g-reg; then
         sudo mkdir -p $GLANCE_CONF_DIR
     fi
     sudo chown `whoami` $GLANCE_CONF_DIR
+
     GLANCE_IMAGE_DIR=$DEST/glance/images
     # Delete existing images
     rm -rf $GLANCE_IMAGE_DIR
-
-    # Use local glance directories
     mkdir -p $GLANCE_IMAGE_DIR
+
+    GLANCE_CACHE_DIR=$DEST/glance/cache
+    # Delete existing images
+    rm -rf $GLANCE_CACHE_DIR
+    mkdir -p $GLANCE_CACHE_DIR
 
     # (re)create glance database
     mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'DROP DATABASE IF EXISTS glance;'
@@ -1077,16 +1094,13 @@ if is_service_enabled g-reg; then
     iniset $GLANCE_REGISTRY_CONF DEFAULT sql_connection $BASE_SQL_CONN/glance?charset=utf8
     iniset $GLANCE_REGISTRY_CONF DEFAULT use_syslog $SYSLOG
     iniset $GLANCE_REGISTRY_CONF paste_deploy flavor keystone
-
-    GLANCE_REGISTRY_PASTE_INI=$GLANCE_CONF_DIR/glance-registry-paste.ini
-    cp $GLANCE_DIR/etc/glance-registry-paste.ini $GLANCE_REGISTRY_PASTE_INI
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken auth_host $KEYSTONE_AUTH_HOST
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken auth_port $KEYSTONE_AUTH_PORT
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT/
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken admin_user glance
-    iniset $GLANCE_REGISTRY_PASTE_INI filter:authtoken admin_password $SERVICE_PASSWORD
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken auth_host $KEYSTONE_AUTH_HOST
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken auth_port $KEYSTONE_AUTH_PORT
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT/
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken admin_tenant_name $SERVICE_TENANT_NAME
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken admin_user glance
+    iniset $GLANCE_REGISTRY_CONF keystone_authtoken admin_password $SERVICE_PASSWORD
 
     GLANCE_API_CONF=$GLANCE_CONF_DIR/glance-api.conf
     cp $GLANCE_DIR/etc/glance-api.conf $GLANCE_API_CONF
@@ -1095,7 +1109,15 @@ if is_service_enabled g-reg; then
     iniset $GLANCE_API_CONF DEFAULT sql_connection $BASE_SQL_CONN/glance?charset=utf8
     iniset $GLANCE_API_CONF DEFAULT use_syslog $SYSLOG
     iniset $GLANCE_API_CONF DEFAULT filesystem_store_datadir $GLANCE_IMAGE_DIR/
-    iniset $GLANCE_API_CONF paste_deploy flavor keystone
+    iniset $GLANCE_API_CONF DEFAULT image_cache_dir $GLANCE_CACHE_DIR/
+    iniset $GLANCE_API_CONF paste_deploy flavor keystone+cachemanagement
+    iniset $GLANCE_API_CONF keystone_authtoken auth_host $KEYSTONE_AUTH_HOST
+    iniset $GLANCE_API_CONF keystone_authtoken auth_port $KEYSTONE_AUTH_PORT
+    iniset $GLANCE_API_CONF keystone_authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
+    iniset $GLANCE_API_CONF keystone_authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT/
+    iniset $GLANCE_API_CONF keystone_authtoken admin_tenant_name $SERVICE_TENANT_NAME
+    iniset $GLANCE_API_CONF keystone_authtoken admin_user glance
+    iniset $GLANCE_API_CONF keystone_authtoken admin_password $SERVICE_PASSWORD
 
     # Store the images in swift if enabled.
     if is_service_enabled swift; then
@@ -1106,15 +1128,28 @@ if is_service_enabled g-reg; then
         iniset $GLANCE_API_CONF DEFAULT swift_store_create_container_on_put True
     fi
 
+    GLANCE_REGISTRY_PASTE_INI=$GLANCE_CONF_DIR/glance-registry-paste.ini
+    cp $GLANCE_DIR/etc/glance-registry-paste.ini $GLANCE_REGISTRY_PASTE_INI
+
     GLANCE_API_PASTE_INI=$GLANCE_CONF_DIR/glance-api-paste.ini
     cp $GLANCE_DIR/etc/glance-api-paste.ini $GLANCE_API_PASTE_INI
-    iniset $GLANCE_API_PASTE_INI filter:authtoken auth_host $KEYSTONE_AUTH_HOST
-    iniset $GLANCE_API_PASTE_INI filter:authtoken auth_port $KEYSTONE_AUTH_PORT
-    iniset $GLANCE_API_PASTE_INI filter:authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
-    iniset $GLANCE_API_PASTE_INI filter:authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT/
-    iniset $GLANCE_API_PASTE_INI filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $GLANCE_API_PASTE_INI filter:authtoken admin_user glance
-    iniset $GLANCE_API_PASTE_INI filter:authtoken admin_password $SERVICE_PASSWORD
+
+    GLANCE_CACHE_CONF=$GLANCE_CONF_DIR/glance-cache.conf
+    cp $GLANCE_DIR/etc/glance-cache.conf $GLANCE_CACHE_CONF
+    iniset $GLANCE_CACHE_CONF DEFAULT debug True
+    inicomment $GLANCE_CACHE_CONF DEFAULT log_file
+    iniset $GLANCE_CACHE_CONF DEFAULT use_syslog $SYSLOG
+    iniset $GLANCE_CACHE_CONF DEFAULT filesystem_store_datadir $GLANCE_IMAGE_DIR/
+    iniset $GLANCE_CACHE_CONF DEFAULT image_cache_dir $GLANCE_CACHE_DIR/
+    iniuncomment $GLANCE_CACHE_CONF DEFAULT auth_url
+    iniset $GLANCE_CACHE_CONF DEFAULT auth_url $KEYSTONE_AUTH_PROTOCOL://$KEYSTONE_AUTH_HOST:$KEYSTONE_AUTH_PORT/v2.0
+    iniuncomment $GLANCE_CACHE_CONF DEFAULT auth_tenant_name
+    iniset $GLANCE_CACHE_CONF DEFAULT admin_tenant_name $SERVICE_TENANT_NAME
+    iniuncomment $GLANCE_CACHE_CONF DEFAULT auth_user
+    iniset $GLANCE_CACHE_CONF DEFAULT admin_user glance
+    iniuncomment $GLANCE_CACHE_CONF DEFAULT auth_password
+    iniset $GLANCE_CACHE_CONF DEFAULT admin_password $SERVICE_PASSWORD
+
 
     GLANCE_POLICY_JSON=$GLANCE_CONF_DIR/policy.json
     cp $GLANCE_DIR/etc/policy.json $GLANCE_POLICY_JSON
@@ -1128,7 +1163,67 @@ fi
 # -------
 
 if is_service_enabled quantum; then
-    # Put config files in /etc/quantum for everyone to find
+    #
+    # Quantum Network Configuration
+    #
+    # The following variables control the Quantum openvswitch and
+    # linuxbridge plugins' allocation of tenant networks and
+    # availability of provider networks. If these are not configured
+    # in localrc, tenant networks will be local to the host (with no
+    # remote connectivity), and no physical resources will be
+    # available for the allocation of provider networks.
+
+    # To use GRE tunnels for tenant networks, set to True in
+    # localrc. GRE tunnels are only supported by the openvswitch
+    # plugin, and currently only on Ubuntu.
+    ENABLE_TENANT_TUNNELS=${ENABLE_TENANT_TUNNELS:-False}
+
+    # If using GRE tunnels for tenant networks, specify the range of
+    # tunnel IDs from which tenant networks are allocated. Can be
+    # overriden in localrc in necesssary.
+    TENANT_TUNNEL_RANGES=${TENANT_TUNNEL_RANGE:-1:1000}
+
+    # To use VLANs for tenant networks, set to True in localrc. VLANs
+    # are supported by the openvswitch and linuxbridge plugins, each
+    # requiring additional configuration described below.
+    ENABLE_TENANT_VLANS=${ENABLE_TENANT_VLANS:-False}
+
+    # If using VLANs for tenant networks, set in localrc to specify
+    # the range of VLAN VIDs from which tenant networks are
+    # allocated. An external network switch must be configured to
+    # trunk these VLANs between hosts for multi-host connectivity.
+    #
+    # Example: TENANT_VLAN_RANGE=1000:1999
+    TENANT_VLAN_RANGE=${TENANT_VLAN_RANGE:-}
+
+    # If using VLANs for tenant networks, or if using flat or VLAN
+    # provider networks, set in localrc to the name of the physical
+    # network, and also configure OVS_PHYSICAL_BRIDGE for the
+    # openvswitch agent or LB_PHYSICAL_INTERFACE for the linuxbridge
+    # agent, as described below.
+    #
+    # Example: PHYSICAL_NETWORK=default
+    PHYSICAL_NETWORK=${PHYSICAL_NETWORK:-}
+
+    # With the openvswitch plugin, if using VLANs for tenant networks,
+    # or if using flat or VLAN provider networks, set in localrc to
+    # the name of the OVS bridge to use for the physical network. The
+    # bridge will be created if it does not already exist, but a
+    # physical interface must be manually added to the bridge as a
+    # port for external connectivity.
+    #
+    # Example: OVS_PHYSICAL_BRIDGE=br-eth1
+    OVS_PHYSICAL_BRIDGE=${OVS_PHYSICAL_BRIDGE:-}
+
+    # With the linuxbridge plugin, if using VLANs for tenant networks,
+    # or if using flat or VLAN provider networks, set in localrc to
+    # the name of the network interface to use for the physical
+    # network.
+    #
+    # Example: LB_PHYSICAL_INTERFACE=eth1
+    LB_PHYSICAL_INTERFACE=${LB_PHYSICAL_INTERFACE:-}
+
+    # Put config files in ``/etc/quantum`` for everyone to find
     if [[ ! -d /etc/quantum ]]; then
         sudo mkdir -p /etc/quantum
     fi
@@ -1138,11 +1233,7 @@ if is_service_enabled quantum; then
         Q_PLUGIN_CONF_PATH=etc/quantum/plugins/openvswitch
         Q_PLUGIN_CONF_FILENAME=ovs_quantum_plugin.ini
         Q_DB_NAME="ovs_quantum"
-        if [[ "$NOVA_USE_QUANTUM_API" = "v1" ]]; then
-            Q_PLUGIN_CLASS="quantum.plugins.openvswitch.ovs_quantum_plugin.OVSQuantumPlugin"
-        elif [[ "$NOVA_USE_QUANTUM_API" = "v2" ]]; then
-            Q_PLUGIN_CLASS="quantum.plugins.openvswitch.ovs_quantum_plugin.OVSQuantumPluginV2"
-        fi
+        Q_PLUGIN_CLASS="quantum.plugins.openvswitch.ovs_quantum_plugin.OVSQuantumPluginV2"
     elif [[ "$Q_PLUGIN" = "linuxbridge" ]]; then
         Q_PLUGIN_CONF_PATH=etc/quantum/plugins/linuxbridge
         Q_PLUGIN_CONF_FILENAME=linuxbridge_conf.ini
@@ -1165,38 +1256,22 @@ if is_service_enabled quantum; then
         exit 1
     fi
 
-    # If needed, move config file from $QUANTUM_DIR/etc/quantum to /etc/quantum
+    # If needed, move config file from ``$QUANTUM_DIR/etc/quantum`` to ``/etc/quantum``
     mkdir -p /$Q_PLUGIN_CONF_PATH
     Q_PLUGIN_CONF_FILE=$Q_PLUGIN_CONF_PATH/$Q_PLUGIN_CONF_FILENAME
     cp $QUANTUM_DIR/$Q_PLUGIN_CONF_FILE /$Q_PLUGIN_CONF_FILE
 
-    sudo sed -i -e "s/^sql_connection =.*$/sql_connection = mysql:\/\/$MYSQL_USER:$MYSQL_PASSWORD@$MYSQL_HOST\/$Q_DB_NAME?charset=utf8/g" /$Q_PLUGIN_CONF_FILE
+    iniset /$Q_PLUGIN_CONF_FILE DATABASE sql_connection mysql:\/\/$MYSQL_USER:$MYSQL_PASSWORD@$MYSQL_HOST\/$Q_DB_NAME?charset=utf8
 
-    OVS_ENABLE_TUNNELING=${OVS_ENABLE_TUNNELING:-True}
-    if [[ "$Q_PLUGIN" = "openvswitch" && $OVS_ENABLE_TUNNELING = "True" ]]; then
-        OVS_VERSION=`ovs-vsctl --version | head -n 1 | awk '{print $4;}'`
-        if [ $OVS_VERSION \< "1.4" ] && ! is_service_enabled q-svc ; then
-            echo "You are running OVS version $OVS_VERSION."
-            echo "OVS 1.4+ is required for tunneling between multiple hosts."
-            exit 1
-        fi
-        sudo sed -i -e "s/.*enable_tunneling = .*$/enable_tunneling = $OVS_ENABLE_TUNNELING/g" /$Q_PLUGIN_CONF_FILE
-    fi
-
-    if [[ "$NOVA_USE_QUANTUM_API" = "v1" ]]; then
-        iniset /$Q_PLUGIN_CONF_FILE AGENT target_v2_api False
-    elif [[ "$NOVA_USE_QUANTUM_API" = "v2" ]]; then
-        iniset /$Q_PLUGIN_CONF_FILE AGENT target_v2_api True
-    fi
+    Q_CONF_FILE=/etc/quantum/quantum.conf
+    cp $QUANTUM_DIR/etc/quantum.conf $Q_CONF_FILE
 fi
 
 # Quantum service (for controller node)
 if is_service_enabled q-svc; then
-    Q_CONF_FILE=/etc/quantum/quantum.conf
     Q_API_PASTE_FILE=/etc/quantum/api-paste.ini
     Q_POLICY_FILE=/etc/quantum/policy.json
 
-    cp $QUANTUM_DIR/etc/quantum.conf $Q_CONF_FILE
     cp $QUANTUM_DIR/etc/api-paste.ini $Q_API_PASTE_FILE
     cp $QUANTUM_DIR/etc/policy.json $Q_POLICY_FILE
 
@@ -1234,20 +1309,56 @@ EOF
     iniset $Q_CONF_FILE DEFAULT core_plugin $Q_PLUGIN_CLASS
 
     iniset $Q_CONF_FILE DEFAULT auth_strategy $Q_AUTH_STRATEGY
-    iniset $Q_API_PASTE_FILE filter:authtoken auth_host $KEYSTONE_SERVICE_HOST
-    iniset $Q_API_PASTE_FILE filter:authtoken auth_port $KEYSTONE_AUTH_PORT
-    iniset $Q_API_PASTE_FILE filter:authtoken auth_protocol $KEYSTONE_SERVICE_PROTOCOL
-    iniset $Q_API_PASTE_FILE filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $Q_API_PASTE_FILE filter:authtoken admin_user $Q_ADMIN_USERNAME
-    iniset $Q_API_PASTE_FILE filter:authtoken admin_password $SERVICE_PASSWORD
+    quantum_setup_keystone $Q_API_PASTE_FILE filter:authtoken
 
-    screen_it q-svc "cd $QUANTUM_DIR && python $QUANTUM_DIR/bin/quantum-server --config-file $Q_CONF_FILE --config-file /$Q_PLUGIN_CONF_FILE"
+    # Configure plugin
+    if [[ "$Q_PLUGIN" = "openvswitch" ]]; then
+        if [[ "$ENABLE_TENANT_TUNNELS" = "True" ]]; then
+            iniset /$Q_PLUGIN_CONF_FILE OVS tenant_network_type gre
+            iniset /$Q_PLUGIN_CONF_FILE OVS tunnel_id_ranges $TENANT_TUNNEL_RANGES
+        elif [[ "$ENABLE_TENANT_VLANS" = "True" ]]; then
+            iniset /$Q_PLUGIN_CONF_FILE OVS tenant_network_type vlan
+        else
+            echo "WARNING - The openvswitch plugin is using local tenant networks, with no connectivity between hosts."
+        fi
+
+        # Override OVS_VLAN_RANGES and OVS_BRIDGE_MAPPINGS in localrc
+        # for more complex physical network configurations.
+        if [[ "$OVS_VLAN_RANGES" = "" ]] && [[ "$PHYSICAL_NETWORK" != "" ]]; then
+            OVS_VLAN_RANGES=$PHYSICAL_NETWORK
+            if [[ "$TENANT_VLAN_RANGE" != "" ]]; then
+                OVS_VLAN_RANGES=$OVS_VLAN_RANGES:$TENANT_VLAN_RANGE
+            fi
+        fi
+        if [[ "$OVS_VLAN_RANGES" != "" ]]; then
+            iniset /$Q_PLUGIN_CONF_FILE OVS network_vlan_ranges $OVS_VLAN_RANGES
+        fi
+    elif [[ "$Q_PLUGIN" = "linuxbridge" ]]; then
+        if [[ "$ENABLE_TENANT_VLANS" = "True" ]]; then
+            iniset /$Q_PLUGIN_CONF_FILE VLANS tenant_network_type vlan
+        else
+            echo "WARNING - The linuxbridge plugin is using local tenant networks, with no connectivity between hosts."
+        fi
+
+        # Override LB_VLAN_RANGES and LB_INTERFACE_MAPPINGS in localrc
+        # for more complex physical network configurations.
+        if [[ "$LB_VLAN_RANGES" = "" ]] && [[ "$PHYSICAL_NETWORK" != "" ]]; then
+            LB_VLAN_RANGES=$PHYSICAL_NETWORK
+            if [[ "$TENANT_VLAN_RANGE" != "" ]]; then
+                LB_VLAN_RANGES=$LB_VLAN_RANGES:$TENANT_VLAN_RANGE
+            fi
+        fi
+        if [[ "$LB_VLAN_RANGES" != "" ]]; then
+            iniset /$Q_PLUGIN_CONF_FILE VLANS network_vlan_ranges $LB_VLAN_RANGES
+        fi
+    fi
 fi
 
 # Quantum agent (for compute nodes)
 if is_service_enabled q-agt; then
+    # Configure agent for plugin
     if [[ "$Q_PLUGIN" = "openvswitch" ]]; then
-        # Set up integration bridge
+        # Setup integration bridge
         OVS_BRIDGE=${OVS_BRIDGE:-br-int}
         for PORT in `sudo ovs-vsctl --no-wait list-ports $OVS_BRIDGE`; do
             if [[ "$PORT" =~ tap* ]]; then echo `sudo ip link delete $PORT` > /dev/null; fi
@@ -1306,58 +1417,81 @@ if is_service_enabled q-dhcp; then
 
     Q_DHCP_CONF_FILE=/etc/quantum/dhcp_agent.ini
 
-    if [[ -e $QUANTUM_DIR/etc/dhcp_agent.ini ]]; then
-      sudo cp $QUANTUM_DIR/etc/dhcp_agent.ini $Q_DHCP_CONF_FILE
-    fi
+    cp $QUANTUM_DIR/etc/dhcp_agent.ini $Q_DHCP_CONF_FILE
 
     # Set verbose
     iniset $Q_DHCP_CONF_FILE DEFAULT verbose True
     # Set debug
     iniset $Q_DHCP_CONF_FILE DEFAULT debug True
+    iniset $Q_DHCP_CONF_FILE DEFAULT use_namespaces $Q_USE_NAMESPACE
 
     # Update database
     iniset $Q_DHCP_CONF_FILE DEFAULT db_connection "mysql:\/\/$MYSQL_USER:$MYSQL_PASSWORD@$MYSQL_HOST\/$Q_DB_NAME?charset=utf8"
-    iniset $Q_DHCP_CONF_FILE DEFAULT auth_url "$KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_AUTH_HOST:$KEYSTONE_AUTH_PORT/v2.0"
-    iniset $Q_DHCP_CONF_FILE DEFAULT admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $Q_DHCP_CONF_FILE DEFAULT admin_user $Q_ADMIN_USERNAME
-    iniset $Q_DHCP_CONF_FILE DEFAULT admin_password $SERVICE_PASSWORD
+    quantum_setup_keystone $Q_DHCP_CONF_FILE DEFAULT set_auth_url
 
     if [[ "$Q_PLUGIN" = "openvswitch" ]]; then
         iniset $Q_DHCP_CONF_FILE DEFAULT interface_driver quantum.agent.linux.interface.OVSInterfaceDriver
     elif [[ "$Q_PLUGIN" = "linuxbridge" ]]; then
         iniset $Q_DHCP_CONF_FILE DEFAULT interface_driver quantum.agent.linux.interface.BridgeInterfaceDriver
     fi
-    # Start up the quantum agent
-    screen_it q-dhcp "sudo python $AGENT_DHCP_BINARY --config-file=$Q_DHCP_CONF_FILE"
 fi
 
-# Melange service
-if is_service_enabled m-svc; then
-    if is_service_enabled mysql; then
-        mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'DROP DATABASE IF EXISTS melange;'
-        mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'CREATE DATABASE melange CHARACTER SET utf8;'
-    else
-        echo "mysql must be enabled in order to use the $Q_PLUGIN Quantum plugin."
-        exit 1
+# Quantum L3
+if is_service_enabled q-l3; then
+    AGENT_L3_BINARY="$QUANTUM_DIR/bin/quantum-l3-agent"
+    PUBLIC_BRIDGE=${PUBLIC_BRIDGE:-br-ex}
+    Q_L3_CONF_FILE=/etc/quantum/l3_agent.ini
+
+    cp $QUANTUM_DIR/etc/l3_agent.ini $Q_L3_CONF_FILE
+
+    # Set verbose
+    iniset $Q_L3_CONF_FILE DEFAULT verbose True
+    # Set debug
+    iniset $Q_L3_CONF_FILE DEFAULT debug True
+
+    iniset $Q_L3_CONF_FILE DEFAULT metadata_ip $Q_META_DATA_IP
+    iniset $Q_L3_CONF_FILE DEFAULT use_namespaces $Q_USE_NAMESPACE
+    iniset $Q_L3_CONF_FILE DEFAULT external_network_bridge $PUBLIC_BRIDGE
+
+    quantum_setup_keystone $Q_L3_CONF_FILE DEFAULT set_auth_url
+    if [[ "$Q_PLUGIN" == "openvswitch" ]]; then
+        iniset $Q_L3_CONF_FILE DEFAULT interface_driver quantum.agent.linux.interface.OVSInterfaceDriver
+        # Set up external bridge
+        # Create it if it does not exist
+        sudo ovs-vsctl --no-wait -- --may-exist add-br $PUBLIC_BRIDGE
+        sudo ovs-vsctl --no-wait br-set-external-id $PUBLIC_BRIDGE bridge-id $PUBLIC_BRIDGE
+        # remove internal ports
+        for PORT in `sudo ovs-vsctl --no-wait list-ports $PUBLIC_BRIDGE`; do
+            TYPE=$(sudo ovs-vsctl get interface $PORT type)
+            if [[ "$TYPE" == "internal" ]]; then
+                echo `sudo ip link delete $PORT` > /dev/null
+                sudo ovs-vsctl --no-wait del-port $bridge $PORT
+            fi
+        done
+        # ensure no IP is configured on the public bridge
+        sudo ip addr flush dev $PUBLIC_BRIDGE
+    elif [[ "$Q_PLUGIN" = "linuxbridge" ]]; then
+        iniset $Q_L3_CONF_FILE DEFAULT interface_driver quantum.agent.linux.interface.BridgeInterfaceDriver
     fi
-    MELANGE_CONFIG_FILE=$MELANGE_DIR/etc/melange/melange.conf
-    cp $MELANGE_CONFIG_FILE.sample $MELANGE_CONFIG_FILE
-    sed -i -e "s/^sql_connection =.*$/sql_connection = mysql:\/\/$MYSQL_USER:$MYSQL_PASSWORD@$MYSQL_HOST\/melange?charset=utf8/g" $MELANGE_CONFIG_FILE
-    cd $MELANGE_DIR && PYTHONPATH=.:$PYTHONPATH python $MELANGE_DIR/bin/melange-manage --config-file=$MELANGE_CONFIG_FILE db_sync
-    screen_it m-svc "cd $MELANGE_DIR && PYTHONPATH=.:$PYTHONPATH python $MELANGE_DIR/bin/melange-server --config-file=$MELANGE_CONFIG_FILE"
-    echo "Waiting for melange to start..."
-    if ! timeout $SERVICE_TIMEOUT sh -c "while ! http_proxy= wget -q -O- http://127.0.0.1:9898; do sleep 1; done"; then
-      echo "melange-server did not start"
-      exit 1
-    fi
-    melange mac_address_range create cidr=$M_MAC_RANGE
 fi
 
+# Quantum RPC support - must be updated prior to starting any of the services
+if is_service_enabled quantum; then
+    iniset $Q_CONF_FILE DEFAULT control_exchange quantum
+    if is_service_enabled qpid ; then
+        iniset $Q_CONF_FILE DEFAULT rpc_backend quantum.openstack.common.rpc.impl_qpid
+    elif is_service_enabled zeromq; then
+        iniset $Q_CONF_FILE DEFAULT rpc_backend quantum.openstack.common.rpc.impl_zmq
+    elif [ -n "$RABBIT_HOST" ] &&  [ -n "$RABBIT_PASSWORD" ]; then
+        iniset $Q_CONF_FILE DEFAULT rabbit_host $RABBIT_HOST
+        iniset $Q_CONF_FILE DEFAULT rabbit_password $RABBIT_PASSWORD
+    fi
+fi
 
 # Nova
 # ----
 
-# Put config files in /etc/nova for everyone to find
+# Put config files in ``/etc/nova`` for everyone to find
 NOVA_CONF_DIR=/etc/nova
 if [[ ! -d $NOVA_CONF_DIR ]]; then
     sudo mkdir -p $NOVA_CONF_DIR
@@ -1367,7 +1501,7 @@ sudo chown `whoami` $NOVA_CONF_DIR
 cp -p $NOVA_DIR/etc/nova/policy.json $NOVA_CONF_DIR
 
 # If Nova ships the new rootwrap filters files, deploy them
-# (owned by root) and add a parameter to $NOVA_ROOTWRAP
+# (owned by root) and add a parameter to ``$NOVA_ROOTWRAP``
 ROOTWRAP_SUDOER_CMD="$NOVA_ROOTWRAP"
 if [[ -d $NOVA_DIR/etc/nova/rootwrap.d ]]; then
     # Wipe any existing rootwrap.d files first
@@ -1440,7 +1574,7 @@ if is_service_enabled n-cpu; then
     # Force IP forwarding on, just on case
     sudo sysctl -w net.ipv4.ip_forward=1
 
-    # attempt to load modules: network block device - used to manage qcow images
+    # Attempt to load modules: network block device - used to manage qcow images
     sudo modprobe nbd || true
 
     # Check for kvm (hardware based virtualization).  If unable to initialize
@@ -1451,6 +1585,10 @@ if is_service_enabled n-cpu; then
         if [ ! -e /dev/kvm ]; then
             echo "WARNING: Switching to QEMU"
             LIBVIRT_TYPE=qemu
+            if which selinuxenabled 2>&1 > /dev/null && selinuxenabled; then
+                # https://bugzilla.redhat.com/show_bug.cgi?id=753589
+                sudo setsebool virt_use_execmem on
+            fi
         fi
     fi
 
@@ -1504,9 +1642,11 @@ ResultActive=yes
 EOF'
         LIBVIRT_DAEMON=libvirtd
     fi
-    # The user that nova runs as needs to be member of libvirtd group otherwise
+
+    # The user that nova runs as needs to be member of **libvirtd** group otherwise
     # nova-compute will be unable to use libvirt.
     sudo usermod -a -G libvirtd `whoami`
+
     # libvirt detects various settings on startup, as we potentially changed
     # the system configuration (modules, filesystems), we need to restart
     # libvirt to detect those changes.
@@ -1564,17 +1704,17 @@ fi
 
 if is_service_enabled swift; then
 
-    # We make sure to kill all swift processes first
+    # Make sure to kill all swift processes first
     swift-init all stop || true
 
-    # We first do a bit of setup by creating the directories and
+    # First do a bit of setup by creating the directories and
     # changing the permissions so we can run it as our user.
 
     USER_GROUP=$(id -g)
     sudo mkdir -p ${SWIFT_DATA_DIR}/drives
     sudo chown -R $USER:${USER_GROUP} ${SWIFT_DATA_DIR}
 
-    # We then create a loopback disk and format it to XFS.
+    # Create a loopback disk and format it to XFS.
     if [[ -e ${SWIFT_DATA_DIR}/drives/images/swift.img ]]; then
         if egrep -q ${SWIFT_DATA_DIR}/drives/sdb1 /proc/mounts; then
             sudo umount ${SWIFT_DATA_DIR}/drives/sdb1
@@ -1587,24 +1727,22 @@ if is_service_enabled swift; then
         dd if=/dev/zero of=${SWIFT_DATA_DIR}/drives/images/swift.img \
             bs=1024 count=0 seek=${SWIFT_LOOPBACK_DISK_SIZE}
     fi
+
     # Make a fresh XFS filesystem
     mkfs.xfs -f -i size=1024  ${SWIFT_DATA_DIR}/drives/images/swift.img
 
-    # After the drive being created we mount the disk with a few mount
-    # options to make it most efficient as possible for swift.
+    # Mount the disk with mount options to make it as efficient as possible
     mkdir -p ${SWIFT_DATA_DIR}/drives/sdb1
     if ! egrep -q ${SWIFT_DATA_DIR}/drives/sdb1 /proc/mounts; then
         sudo mount -t xfs -o loop,noatime,nodiratime,nobarrier,logbufs=8  \
             ${SWIFT_DATA_DIR}/drives/images/swift.img ${SWIFT_DATA_DIR}/drives/sdb1
     fi
 
-    # We then create link to that mounted location so swift would know
-    # where to go.
+    # Create a link to the above mount
     for x in $(seq ${SWIFT_REPLICAS}); do
         sudo ln -sf ${SWIFT_DATA_DIR}/drives/sdb1/$x ${SWIFT_DATA_DIR}/$x; done
 
-    # We now have to emulate a few different servers into one we
-    # create all the directories needed for swift
+    # Create all of the directories needed to emulate a few different servers
     for x in $(seq ${SWIFT_REPLICAS}); do
             drive=${SWIFT_DATA_DIR}/drives/sdb1/${x}
             node=${SWIFT_DATA_DIR}/${x}/node
@@ -1620,7 +1758,7 @@ if is_service_enabled swift; then
    sudo chown -R $USER: ${SWIFT_CONFIG_DIR} /var/run/swift
 
     if [[ "$SWIFT_CONFIG_DIR" != "/etc/swift" ]]; then
-        # Some swift tools are hard-coded to use /etc/swift and are apparenty not going to be fixed.
+        # Some swift tools are hard-coded to use ``/etc/swift`` and are apparenty not going to be fixed.
         # Create a symlink if the config dir is moved
         sudo ln -sf ${SWIFT_CONFIG_DIR} /etc/swift
     fi
@@ -1647,7 +1785,7 @@ if is_service_enabled swift; then
     # which has some default username and password if you have
     # configured keystone it will checkout the directory.
     if is_service_enabled key; then
-        swift_auth_server+="authtoken keystone"
+        swift_auth_server+="authtoken keystoneauth"
     else
         swift_auth_server=tempauth
     fi
@@ -1677,23 +1815,20 @@ if is_service_enabled swift; then
 
     iniset ${SWIFT_CONFIG_PROXY_SERVER} app:proxy-server account_autocreate true
 
-    cat <<EOF>>${SWIFT_CONFIG_PROXY_SERVER}
+    # Configure Keystone
+    sed -i '/^# \[filter:authtoken\]/,/^# \[filter:keystoneauth\]$/ s/^#[ \t]*//' ${SWIFT_CONFIG_PROXY_SERVER}
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken auth_host $KEYSTONE_AUTH_HOST
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken auth_port $KEYSTONE_AUTH_PORT
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT/
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken admin_user swift
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:authtoken admin_password $SERVICE_PASSWORD
 
-[filter:keystone]
-paste.filter_factory = keystone.middleware.swift_auth:filter_factory
-operator_roles = Member,admin
+    iniuncomment ${SWIFT_CONFIG_PROXY_SERVER} filter:keystoneauth use
+    iniuncomment ${SWIFT_CONFIG_PROXY_SERVER} filter:keystoneauth operator_roles
+    iniset ${SWIFT_CONFIG_PROXY_SERVER} filter:keystoneauth operator_roles "Member, admin"
 
-[filter:authtoken]
-paste.filter_factory = keystone.middleware.auth_token:filter_factory
-auth_host = ${KEYSTONE_AUTH_HOST}
-auth_port = ${KEYSTONE_AUTH_PORT}
-auth_protocol = ${KEYSTONE_AUTH_PROTOCOL}
-auth_uri = ${KEYSTONE_SERVICE_PROTOCOL}://${KEYSTONE_SERVICE_HOST}:${KEYSTONE_SERVICE_PORT}/
-admin_tenant_name = ${SERVICE_TENANT_NAME}
-admin_user = swift
-admin_password = ${SERVICE_PASSWORD}
-delay_auth_decision = 1
-EOF
     if is_service_enabled swift3;then
         cat <<EOF>>${SWIFT_CONFIG_PROXY_SERVER}
 # NOTE(chmou): s3token middleware is not updated yet to use only
@@ -1714,9 +1849,8 @@ EOF
     cp ${SWIFT_DIR}/etc/swift.conf-sample ${SWIFT_CONFIG_DIR}/swift.conf
     iniset ${SWIFT_CONFIG_DIR}/swift.conf swift-hash swift_hash_path_suffix ${SWIFT_HASH}
 
-    # We need to generate a object/account/proxy configuration
-    # emulating 4 nodes on different ports we have a little function
-    # that help us doing that.
+    # This function generates an object/account/proxy configuration
+    # emulating 4 nodes on different ports
     function generate_swift_configuration() {
         local server_type=$1
         local bind_port=$2
@@ -1759,8 +1893,8 @@ EOF
     generate_swift_configuration container 6011 2
     generate_swift_configuration account 6012 2
 
-    # We have some specific configuration for swift for rsyslog. See
-    # the file /etc/rsyslog.d/10-swift.conf for more info.
+    # Specific configuration for swift for rsyslog. See
+    # ``/etc/rsyslog.d/10-swift.conf`` for more info.
     swift_log_dir=${SWIFT_DATA_DIR}/logs
     rm -rf ${swift_log_dir}
     mkdir -p ${swift_log_dir}/hourly
@@ -1801,7 +1935,7 @@ EOF
 
     } && popd >/dev/null
 
-   # We then can start rsync.
+   # Start rsync
     if [[ "$os_PACKAGE" = "deb" ]]; then
         sudo /etc/init.d/rsync restart || :
     else
@@ -1833,56 +1967,14 @@ fi
 if is_service_enabled cinder; then
     init_cinder
 elif is_service_enabled n-vol; then
-    # Configure a default volume group called '`stack-volumes`' for the volume
-    # service if it does not yet exist.  If you don't wish to use a file backed
-    # volume group, create your own volume group called ``stack-volumes`` before
-    # invoking ``stack.sh``.
-    #
-    # By default, the backing file is 5G in size, and is stored in ``/opt/stack/data``.
+    init_nvol
+fi
 
-    if ! sudo vgs $VOLUME_GROUP; then
-        VOLUME_BACKING_FILE=${VOLUME_BACKING_FILE:-$DATA_DIR/${VOLUME_GROUP}-backing-file}
-        # Only create if the file doesn't already exists
-        [[ -f $VOLUME_BACKING_FILE ]] || truncate -s $VOLUME_BACKING_FILE_SIZE $VOLUME_BACKING_FILE
-        DEV=`sudo losetup -f --show $VOLUME_BACKING_FILE`
-        # Only create if the loopback device doesn't contain $VOLUME_GROUP
-        if ! sudo vgs $VOLUME_GROUP; then sudo vgcreate $VOLUME_GROUP $DEV; fi
-    fi
-
-    if sudo vgs $VOLUME_GROUP; then
-        if [[ "$os_PACKAGE" = "rpm" ]]; then
-            # RPM doesn't start the service
-            start_service tgtd
-        fi
-
-        # Setup tgtd configuration files
-        mkdir -p $NOVA_DIR/volumes
-
-        # Remove nova iscsi targets
-        sudo tgtadm --op show --mode target | grep $VOLUME_NAME_PREFIX | grep Target | cut -f3 -d ' ' | sudo xargs -n1 tgt-admin --delete || true
-        # Clean out existing volumes
-        for lv in `sudo lvs --noheadings -o lv_name $VOLUME_GROUP`; do
-            # VOLUME_NAME_PREFIX prefixes the LVs we want
-            if [[ "${lv#$VOLUME_NAME_PREFIX}" != "$lv" ]]; then
-                sudo lvremove -f $VOLUME_GROUP/$lv
-            fi
-        done
-    fi
-
-    if [[ "$os_PACKAGE" = "deb" ]]; then
-
-        # Setup the tgt configuration file
-        if [[ ! -f /etc/tgt/conf.d/nova.conf ]]; then
-           echo "include $NOVA_DIR/volumes/*" | sudo tee /etc/tgt/conf.d/nova.conf
-        fi
-
-        # tgt in oneiric doesn't restart properly if tgtd isn't running
-        # do it in two steps
-        sudo stop tgt || true
-        sudo start tgt
-    else
-        restart_service tgtd
-    fi
+# Support entry points installation of console scripts
+if [ -d $NOVA_DIR/bin ] ; then
+    NOVA_BIN_DIR=$NOVA_DIR/bin
+else
+    NOVA_BIN_DIR=/usr/local/bin
 fi
 
 NOVA_CONF=nova.conf
@@ -1890,10 +1982,10 @@ function add_nova_opt {
     echo "$1" >> $NOVA_CONF_DIR/$NOVA_CONF
 }
 
-# Remove legacy nova.conf
+# Remove legacy ``nova.conf``
 rm -f $NOVA_DIR/bin/nova.conf
 
-# (re)create nova.conf
+# (Re)create ``nova.conf``
 rm -f $NOVA_CONF_DIR/$NOVA_CONF
 add_nova_opt "[DEFAULT]"
 add_nova_opt "verbose=True"
@@ -1906,28 +1998,13 @@ add_nova_opt "fixed_range=$FIXED_RANGE"
 add_nova_opt "s3_host=$SERVICE_HOST"
 add_nova_opt "s3_port=$S3_SERVICE_PORT"
 if is_service_enabled quantum; then
-    if [[ "$NOVA_USE_QUANTUM_API" = "v1" ]]; then
-        add_nova_opt "network_manager=nova.network.quantum.manager.QuantumManager"
-        add_nova_opt "quantum_connection_host=$Q_HOST"
-        add_nova_opt "quantum_connection_port=$Q_PORT"
-        add_nova_opt "quantum_use_dhcp=True"
-
-        if is_service_enabled melange; then
-            add_nova_opt "quantum_ipam_lib=nova.network.quantum.melange_ipam_lib"
-            add_nova_opt "use_melange_mac_generation=True"
-            add_nova_opt "melange_host=$M_HOST"
-            add_nova_opt "melange_port=$M_PORT"
-        fi
-
-    elif [[ "$NOVA_USE_QUANTUM_API" = "v2" ]]; then
-        add_nova_opt "network_api_class=nova.network.quantumv2.api.API"
-        add_nova_opt "quantum_admin_username=$Q_ADMIN_USERNAME"
-        add_nova_opt "quantum_admin_password=$SERVICE_PASSWORD"
-        add_nova_opt "quantum_admin_auth_url=$KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_AUTH_PORT/v2.0"
-        add_nova_opt "quantum_auth_strategy=$Q_AUTH_STRATEGY"
-        add_nova_opt "quantum_admin_tenant_name=$SERVICE_TENANT_NAME"
-        add_nova_opt "quantum_url=http://$Q_HOST:$Q_PORT"
-    fi
+    add_nova_opt "network_api_class=nova.network.quantumv2.api.API"
+    add_nova_opt "quantum_admin_username=$Q_ADMIN_USERNAME"
+    add_nova_opt "quantum_admin_password=$SERVICE_PASSWORD"
+    add_nova_opt "quantum_admin_auth_url=$KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_AUTH_PORT/v2.0"
+    add_nova_opt "quantum_auth_strategy=$Q_AUTH_STRATEGY"
+    add_nova_opt "quantum_admin_tenant_name=$SERVICE_TENANT_NAME"
+    add_nova_opt "quantum_url=http://$Q_HOST:$Q_PORT"
 
     if [[ "$Q_PLUGIN" = "openvswitch" ]]; then
         NOVA_VIF_DRIVER="nova.virt.libvirt.vif.LibvirtOpenVswitchDriver"
@@ -1988,7 +2065,9 @@ add_nova_opt "vncserver_proxyclient_address=$VNCSERVER_PROXYCLIENT_ADDRESS"
 add_nova_opt "api_paste_config=$NOVA_CONF_DIR/api-paste.ini"
 add_nova_opt "image_service=nova.image.glance.GlanceImageService"
 add_nova_opt "ec2_dmz_host=$EC2_DMZ_HOST"
-if is_service_enabled qpid ; then
+if is_service_enabled zeromq; then
+    add_nova_opt "rpc_backend=nova.openstack.common.rpc.impl_zmq"
+elif is_service_enabled qpid; then
     add_nova_opt "rpc_backend=nova.rpc.impl_qpid"
 elif [ -n "$RABBIT_HOST" ] &&  [ -n "$RABBIT_PASSWORD" ]; then
     add_nova_opt "rabbit_host=$RABBIT_HOST"
@@ -2025,13 +2104,13 @@ if is_service_enabled cinder; then
     add_nova_opt "volume_api_class=nova.volume.cinder.API"
 fi
 
-# Provide some transition from EXTRA_FLAGS to EXTRA_OPTS
+# Provide some transition from ``EXTRA_FLAGS`` to ``EXTRA_OPTS``
 if [[ -z "$EXTRA_OPTS" && -n "$EXTRA_FLAGS" ]]; then
     EXTRA_OPTS=$EXTRA_FLAGS
 fi
 
-# You can define extra nova conf flags by defining the array EXTRA_OPTS,
-# For Example: EXTRA_OPTS=(foo=true bar=2)
+# Define extra nova conf flags by defining the array ``EXTRA_OPTS``.
+# For Example: ``EXTRA_OPTS=(foo=true bar=2)``
 for I in "${EXTRA_OPTS[@]}"; do
     # Attempt to convert flags to options
     add_nova_opt ${I//--}
@@ -2068,37 +2147,46 @@ fi
 
 
 # Nova Database
-# ~~~~~~~~~~~~~
+# -------------
 
 # All nova components talk to a central database.  We will need to do this step
 # only once for an entire cluster.
 
 if is_service_enabled mysql && is_service_enabled nova; then
-    # (re)create nova database
+    # (Re)create nova database
     mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'DROP DATABASE IF EXISTS nova;'
+
     # Explicitly use latin1: to avoid lp#829209, nova expects the database to
     # use latin1 by default, and then upgrades the database to utf8 (see the
     # 082_essex.py in nova)
     mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'CREATE DATABASE nova CHARACTER SET latin1;'
 
-    # (re)create nova database
-    $NOVA_DIR/bin/nova-manage db sync
+    # (Re)create nova database
+    $NOVA_BIN_DIR/nova-manage db sync
+fi
+
+
+# Heat
+# ----
+
+if is_service_enabled heat; then
+    init_heat
 fi
 
 
 # Launch Services
 # ===============
 
-# nova api crashes if we start it with a regular screen command,
+# Nova api crashes if we start it with a regular screen command,
 # so send the start command by forcing text into the window.
 # Only run the services specified in ``ENABLED_SERVICES``
 
-# launch the glance registry service
+# Launch the glance registry service
 if is_service_enabled g-reg; then
     screen_it g-reg "cd $GLANCE_DIR; bin/glance-registry --config-file=$GLANCE_CONF_DIR/glance-registry.conf"
 fi
 
-# launch the glance api and wait for it to answer before continuing
+# Launch the glance api and wait for it to answer before continuing
 if is_service_enabled g-api; then
     screen_it g-api "cd $GLANCE_DIR; bin/glance-api --config-file=$GLANCE_CONF_DIR/glance-api.conf"
     echo "Waiting for g-api ($GLANCE_HOSTPORT) to start..."
@@ -2109,7 +2197,7 @@ if is_service_enabled g-api; then
 fi
 
 if is_service_enabled key; then
-    # (re)create keystone database
+    # (Re)create keystone database
     mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'DROP DATABASE IF EXISTS keystone;'
     mysql -u$MYSQL_USER -p$MYSQL_PASSWORD -e 'CREATE DATABASE keystone CHARACTER SET utf8;'
 
@@ -2127,7 +2215,7 @@ if is_service_enabled key; then
         cp -p $KEYSTONE_DIR/etc/policy.json $KEYSTONE_CONF_DIR
     fi
 
-    # Rewrite stock keystone.conf:
+    # Rewrite stock ``keystone.conf``
     iniset $KEYSTONE_CONF DEFAULT admin_token "$SERVICE_TOKEN"
     iniset $KEYSTONE_CONF sql connection "$BASE_SQL_CONN/keystone?charset=utf8"
     iniset $KEYSTONE_CONF ec2 driver "keystone.contrib.ec2.backends.sql.Ec2"
@@ -2138,12 +2226,13 @@ if is_service_enabled key; then
     iniset $KEYSTONE_CONF filter:s3_extension paste.filter_factory "keystone.contrib.s3:S3Extension.factory"
 
     if [[ "$KEYSTONE_CATALOG_BACKEND" = "sql" ]]; then
-        # Configure keystone.conf to use sql
+        # Configure ``keystone.conf`` to use sql
         iniset $KEYSTONE_CONF catalog driver keystone.catalog.backends.sql.Catalog
         inicomment $KEYSTONE_CONF catalog template_file
     else
         KEYSTONE_CATALOG=$KEYSTONE_CONF_DIR/default_catalog.templates
         cp -p $FILES/default_catalog.templates $KEYSTONE_CATALOG
+
         # Add swift endpoints to service catalog if swift is enabled
         if is_service_enabled swift; then
             echo "catalog.RegionOne.object_store.publicURL = http://%PUBLIC_SERVICE_HOST%:8080/v1/AUTH_\$(tenant_id)s" >> $KEYSTONE_CATALOG
@@ -2166,7 +2255,7 @@ if is_service_enabled key; then
             s,%S3_SERVICE_PORT%,$S3_SERVICE_PORT,g;
         " -i $KEYSTONE_CATALOG
 
-        # Configure keystone.conf to use templates
+        # Configure ``keystone.conf`` to use templates
         iniset $KEYSTONE_CONF catalog driver "keystone.catalog.backends.templated.TemplatedCatalog"
         iniset $KEYSTONE_CONF catalog template_file "$KEYSTONE_CATALOG"
     fi
@@ -2183,24 +2272,24 @@ if is_service_enabled key; then
 
     # Initialize keystone database
     $KEYSTONE_DIR/bin/keystone-manage db_sync
-    # set up certificates
+
+    # Set up certificates
     $KEYSTONE_DIR/bin/keystone-manage pki_setup
 
-    # launch keystone and wait for it to answer before continuing
+    # Launch keystone and wait for it to answer before continuing
     screen_it key "cd $KEYSTONE_DIR && $KEYSTONE_DIR/bin/keystone-all --config-file $KEYSTONE_CONF $KEYSTONE_LOG_CONFIG -d --debug"
     echo "Waiting for keystone to start..."
     if ! timeout $SERVICE_TIMEOUT sh -c "while ! http_proxy= curl -s $KEYSTONE_AUTH_PROTOCOL://$SERVICE_HOST:$KEYSTONE_API_PORT/v2.0/ >/dev/null; do sleep 1; done"; then
       echo "keystone did not start"
       exit 1
     fi
-
-    # keystone_data.sh creates services, admin and demo users, and roles.
+    # ``keystone_data.sh`` creates services, admin and demo users, and roles.
     SERVICE_ENDPOINT=$KEYSTONE_AUTH_PROTOCOL://$KEYSTONE_AUTH_HOST:$KEYSTONE_AUTH_PORT/v2.0
 
     ADMIN_PASSWORD=$ADMIN_PASSWORD SERVICE_TENANT_NAME=$SERVICE_TENANT_NAME SERVICE_PASSWORD=$SERVICE_PASSWORD \
     SERVICE_TOKEN=$SERVICE_TOKEN SERVICE_ENDPOINT=$SERVICE_ENDPOINT SERVICE_HOST=$SERVICE_HOST \
     S3_SERVICE_PORT=$S3_SERVICE_PORT KEYSTONE_CATALOG_BACKEND=$KEYSTONE_CATALOG_BACKEND \
-    DEVSTACK_DIR=$TOP_DIR ENABLED_SERVICES=$ENABLED_SERVICES \
+    DEVSTACK_DIR=$TOP_DIR ENABLED_SERVICES=$ENABLED_SERVICES HEAT_API_PORT=$HEAT_API_PORT \
         bash -x $FILES/keystone_data.sh
 
     # Set up auth creds now that keystone is bootstrapped
@@ -2222,10 +2311,12 @@ if is_service_enabled key; then
     fi
 fi
 
+screen_it zeromq "cd $NOVA_DIR && $NOVA_DIR/bin/nova-rpc-zmq-receiver"
+
 # Launch the nova-api and wait for it to answer before continuing
 if is_service_enabled n-api; then
     add_nova_opt "enabled_apis=$NOVA_ENABLED_APIS"
-    screen_it n-api "cd $NOVA_DIR && $NOVA_DIR/bin/nova-api"
+    screen_it n-api "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-api"
     echo "Waiting for nova-api to start..."
     if ! timeout $SERVICE_TIMEOUT sh -c "while ! http_proxy= wget -q -O- http://127.0.0.1:8774; do sleep 1; done"; then
       echo "nova-api did not start"
@@ -2233,45 +2324,79 @@ if is_service_enabled n-api; then
     fi
 fi
 
-# If we're using Quantum (i.e. q-svc is enabled), network creation has to
-# happen after we've started the Quantum service.
-if is_service_enabled mysql && is_service_enabled nova; then
-    if [[ "$NOVA_USE_QUANTUM_API" = "v1" ]]; then
-        # Create a small network
-        $NOVA_DIR/bin/nova-manage network create private $FIXED_RANGE 1 $FIXED_NETWORK_SIZE $NETWORK_CREATE_ARGS
-
-        # Create some floating ips
-        $NOVA_DIR/bin/nova-manage floating create $FLOATING_RANGE
-
-        # Create a second pool
-        $NOVA_DIR/bin/nova-manage floating create --ip_range=$TEST_FLOATING_RANGE --pool=$TEST_FLOATING_POOL
-    elif [[ "$NOVA_USE_QUANTUM_API" = "v2" ]]; then
-        TENANT_ID=$(keystone tenant-list | grep " demo " | get_field 1)
-
-        # Create a small network
-        # Since quantum command is executed in admin context at this point,
-        # --tenant_id needs to be specified.
-        NET_ID=$(quantum net-create --tenant_id $TENANT_ID net1 | grep ' id ' | get_field 2)
-        quantum subnet-create --tenant_id $TENANT_ID --ip_version 4 --gateway $NETWORK_GATEWAY $NET_ID $FIXED_RANGE
+if is_service_enabled q-svc; then
+    # Start the Quantum service
+    screen_it q-svc "cd $QUANTUM_DIR && python $QUANTUM_DIR/bin/quantum-server --config-file $Q_CONF_FILE --config-file /$Q_PLUGIN_CONF_FILE"
+    echo "Waiting for Quantum to start..."
+    if ! timeout $SERVICE_TIMEOUT sh -c "while ! http_proxy= wget -q -O- http://127.0.0.1:9696; do sleep 1; done"; then
+      echo "Quantum did not start"
+      exit 1
     fi
+
+    # Configure Quantum elements
+    # Configure internal network & subnet
+
+    TENANT_ID=$(keystone tenant-list | grep " demo " | get_field 1)
+
+    # Create a small network
+    # Since quantum command is executed in admin context at this point,
+    # ``--tenant_id`` needs to be specified.
+    NET_ID=$(quantum net-create --tenant_id $TENANT_ID net1 | grep ' id ' | get_field 2)
+    SUBNET_ID=$(quantum subnet-create --tenant_id $TENANT_ID --ip_version 4 --gateway $NETWORK_GATEWAY $NET_ID $FIXED_RANGE | grep ' id ' | get_field 2)
+    if is_service_enabled q-l3; then
+        # Create a router, and add the private subnet as one of its interfaces
+        ROUTER_ID=$(quantum router-create --tenant_id $TENANT_ID router1 | grep ' id ' | get_field 2)
+        quantum router-interface-add $ROUTER_ID $SUBNET_ID
+        # Create an external network, and a subnet. Configure the external network as router gw
+        EXT_NET_ID=$(quantum net-create ext_net -- --router:external=True | grep ' id ' | get_field 2)
+        EXT_GW_IP=$(quantum subnet-create --ip_version 4 $EXT_NET_ID $FLOATING_RANGE -- --enable_dhcp=False | grep 'gateway_ip' | get_field 2)
+        quantum router-gateway-set $ROUTER_ID $EXT_NET_ID
+        if [[ "$Q_PLUGIN" = "openvswitch" ]]; then
+            CIDR_LEN=${FLOATING_RANGE#*/}
+            sudo ip addr add $EXT_GW_IP/$CIDR_LEN dev $PUBLIC_BRIDGE
+            sudo ip link set $PUBLIC_BRIDGE up
+        fi
+        if [[ "$Q_USE_NAMESPACE" == "False" ]]; then
+            # Explicitly set router id in l3 agent configuration
+            iniset $Q_L3_CONF_FILE DEFAULT router_id $ROUTER_ID
+        fi
+   fi
+
+elif is_service_enabled mysql && is_service_enabled nova; then
+    # Create a small network
+    $NOVA_BIN_DIR/nova-manage network create private $FIXED_RANGE 1 $FIXED_NETWORK_SIZE $NETWORK_CREATE_ARGS
+
+    # Create some floating ips
+    $NOVA_BIN_DIR/nova-manage floating create $FLOATING_RANGE
+
+    # Create a second pool
+    $NOVA_BIN_DIR/nova-manage floating create --ip_range=$TEST_FLOATING_RANGE --pool=$TEST_FLOATING_POOL
 fi
 
-# Launching nova-compute should be as simple as running ``nova-compute`` but
-# have to do a little more than that in our script.  Since we add the group
-# ``libvirtd`` to our user in this script, when nova-compute is run it is
-# within the context of our original shell (so our groups won't be updated).
-# Use 'sg' to execute nova-compute as a member of the libvirtd group.
-# We don't check for is_service_enable as screen_it does it for us
-screen_it n-cpu "cd $NOVA_DIR && sg libvirtd $NOVA_DIR/bin/nova-compute"
-screen_it n-crt "cd $NOVA_DIR && $NOVA_DIR/bin/nova-cert"
-screen_it n-vol "cd $NOVA_DIR && $NOVA_DIR/bin/nova-volume"
-screen_it n-net "cd $NOVA_DIR && $NOVA_DIR/bin/nova-network"
-screen_it n-sch "cd $NOVA_DIR && $NOVA_DIR/bin/nova-scheduler"
+# Start up the quantum agents if enabled
+screen_it q-agt "sudo python $AGENT_BINARY --config-file $Q_CONF_FILE --config-file /$Q_PLUGIN_CONF_FILE"
+screen_it q-dhcp "sudo python $AGENT_DHCP_BINARY --config-file $Q_CONF_FILE --config-file=$Q_DHCP_CONF_FILE"
+screen_it q-l3 "sudo python $AGENT_L3_BINARY --config-file $Q_CONF_FILE --config-file=$Q_L3_CONF_FILE"
+
+# The group **libvirtd** is added to the current user in this script.
+# Use 'sg' to execute nova-compute as a member of the **libvirtd** group.
+# ``screen_it`` checks ``is_service_enabled``, it is not needed here
+screen_it n-cpu "cd $NOVA_DIR && sg libvirtd $NOVA_BIN_DIR/nova-compute"
+screen_it n-crt "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cert"
+screen_it n-net "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-network"
+screen_it n-sch "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-scheduler"
 screen_it n-novnc "cd $NOVNC_DIR && ./utils/nova-novncproxy --config-file $NOVA_CONF_DIR/$NOVA_CONF --web ."
 screen_it n-xvnc "cd $NOVA_DIR && ./bin/nova-xvpvncproxy --config-file $NOVA_CONF_DIR/$NOVA_CONF"
 screen_it n-cauth "cd $NOVA_DIR && ./bin/nova-consoleauth"
+if is_service_enabled n-vol; then
+    start_nvol
+fi
 if is_service_enabled cinder; then
     start_cinder
+fi
+if is_service_enabled ceilometer; then
+    configure_ceilometer
+    start_ceilometer
 fi
 screen_it horizon "cd $HORIZON_DIR && sudo tail -f /var/log/$APACHE_NAME/horizon_error.log"
 screen_it swift "cd $SWIFT_DIR && $SWIFT_DIR/bin/swift-proxy-server ${SWIFT_CONFIG_DIR}/proxy-server.conf -v"
@@ -2279,7 +2404,12 @@ screen_it swift "cd $SWIFT_DIR && $SWIFT_DIR/bin/swift-proxy-server ${SWIFT_CONF
 # Starting the nova-objectstore only if swift3 service is not enabled.
 # Swift will act as s3 objectstore.
 is_service_enabled swift3 || \
-    screen_it n-obj "cd $NOVA_DIR && $NOVA_DIR/bin/nova-objectstore"
+    screen_it n-obj "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-objectstore"
+
+# launch heat engine, api and metadata
+if is_service_enabled heat; then
+    start_heat
+fi
 
 
 # Install Images
@@ -2287,21 +2417,15 @@ is_service_enabled swift3 || \
 
 # Upload an image to glance.
 #
-# The default image is a small ***TTY*** testing image, which lets you login
-# the username/password of root/password.
-#
-# TTY also uses ``cloud-init``, supporting login via keypair and sending scripts as
+# The default image is cirros, a small testing image which lets you login as **root**
+# cirros also uses ``cloud-init``, supporting login via keypair and sending scripts as
 # userdata.  See https://help.ubuntu.com/community/CloudInit for more on cloud-init
 #
-# Override ``IMAGE_URLS`` with a comma-separated list of uec images.
-#
-#  * **natty**: http://uec-images.ubuntu.com/natty/current/natty-server-cloudimg-amd64.tar.gz
+# Override ``IMAGE_URLS`` with a comma-separated list of UEC images.
 #  * **oneiric**: http://uec-images.ubuntu.com/oneiric/current/oneiric-server-cloudimg-amd64.tar.gz
+#  * **precise**: http://uec-images.ubuntu.com/precise/current/precise-server-cloudimg-amd64.tar.gz
 
 if is_service_enabled g-reg; then
-    # Create a directory for the downloaded image tarballs.
-    mkdir -p $FILES/images
-
     TOKEN=$(keystone  token-get | grep ' id ' | get_field 2)
 
     # Option to upload legacy ami-tty, which works with xenserver
@@ -2310,80 +2434,7 @@ if is_service_enabled g-reg; then
     fi
 
     for image_url in ${IMAGE_URLS//,/ }; do
-        # Downloads the image (uec ami+aki style), then extracts it.
-        IMAGE_FNAME=`basename "$image_url"`
-        if [[ ! -f $FILES/$IMAGE_FNAME || "$(stat -c "%s" $FILES/$IMAGE_FNAME)" = "0" ]]; then
-            wget -c $image_url -O $FILES/$IMAGE_FNAME
-        fi
-
-        # OpenVZ-format images are provided as .tar.gz, but not decompressed prior to loading
-        if [[ "$image_url" =~ 'openvz' ]]; then
-            IMAGE="$FILES/${IMAGE_FNAME}"
-            IMAGE_NAME="${IMAGE_FNAME%.tar.gz}"
-            glance --os-auth-token $TOKEN --os-image-url http://$GLANCE_HOSTPORT image-create --name "$IMAGE_NAME" --public --container-format ami --disk-format ami < "$IMAGE"
-            continue
-        fi
-
-        KERNEL=""
-        RAMDISK=""
-        DISK_FORMAT=""
-        CONTAINER_FORMAT=""
-        case "$IMAGE_FNAME" in
-            *.tar.gz|*.tgz)
-                # Extract ami and aki files
-                [ "${IMAGE_FNAME%.tar.gz}" != "$IMAGE_FNAME" ] &&
-                    IMAGE_NAME="${IMAGE_FNAME%.tar.gz}" ||
-                    IMAGE_NAME="${IMAGE_FNAME%.tgz}"
-                xdir="$FILES/images/$IMAGE_NAME"
-                rm -Rf "$xdir";
-                mkdir "$xdir"
-                tar -zxf $FILES/$IMAGE_FNAME -C "$xdir"
-                KERNEL=$(for f in "$xdir/"*-vmlinuz* "$xdir/"aki-*/image; do
-                         [ -f "$f" ] && echo "$f" && break; done; true)
-                RAMDISK=$(for f in "$xdir/"*-initrd* "$xdir/"ari-*/image; do
-                         [ -f "$f" ] && echo "$f" && break; done; true)
-                IMAGE=$(for f in "$xdir/"*.img "$xdir/"ami-*/image; do
-                         [ -f "$f" ] && echo "$f" && break; done; true)
-                if [[ -z "$IMAGE_NAME" ]]; then
-                    IMAGE_NAME=$(basename "$IMAGE" ".img")
-                fi
-                ;;
-            *.img)
-                IMAGE="$FILES/$IMAGE_FNAME";
-                IMAGE_NAME=$(basename "$IMAGE" ".img")
-                DISK_FORMAT=raw
-                CONTAINER_FORMAT=bare
-                ;;
-            *.img.gz)
-                IMAGE="$FILES/${IMAGE_FNAME}"
-                IMAGE_NAME=$(basename "$IMAGE" ".img.gz")
-                DISK_FORMAT=raw
-                CONTAINER_FORMAT=bare
-                ;;
-            *.qcow2)
-                IMAGE="$FILES/${IMAGE_FNAME}"
-                IMAGE_NAME=$(basename "$IMAGE" ".qcow2")
-                DISK_FORMAT=qcow2
-                CONTAINER_FORMAT=bare
-                ;;
-            *) echo "Do not know what to do with $IMAGE_FNAME"; false;;
-        esac
-
-        if [ "$CONTAINER_FORMAT" = "bare" ]; then
-            glance --os-auth-token $TOKEN --os-image-url http://$GLANCE_HOSTPORT image-create --name "$IMAGE_NAME" --public --container-format=$CONTAINER_FORMAT --disk-format $DISK_FORMAT < <(zcat --force "${IMAGE}")
-        else
-            # Use glance client to add the kernel the root filesystem.
-            # We parse the results of the first upload to get the glance ID of the
-            # kernel for use when uploading the root filesystem.
-            KERNEL_ID=""; RAMDISK_ID="";
-            if [ -n "$KERNEL" ]; then
-                KERNEL_ID=$(glance --os-auth-token $TOKEN --os-image-url http://$GLANCE_HOSTPORT image-create --name "$IMAGE_NAME-kernel" --public --container-format aki --disk-format aki < "$KERNEL" | grep ' id ' | get_field 2)
-            fi
-            if [ -n "$RAMDISK" ]; then
-                RAMDISK_ID=$(glance --os-auth-token $TOKEN --os-image-url http://$GLANCE_HOSTPORT image-create --name "$IMAGE_NAME-ramdisk" --public --container-format ari --disk-format ari < "$RAMDISK" | grep ' id ' | get_field 2)
-            fi
-            glance --os-auth-token $TOKEN --os-image-url http://$GLANCE_HOSTPORT image-create --name "${IMAGE_NAME%.img}" --public --container-format ami --disk-format ami ${KERNEL_ID:+--property kernel_id=$KERNEL_ID} ${RAMDISK_ID:+--property ramdisk_id=$RAMDISK_ID} < "${IMAGE}"
-        fi
+        upload_image $image_url $TOKEN
     done
 fi
 
@@ -2405,7 +2456,7 @@ set +o xtrace
 
 
 # Using the cloud
-# ===============
+# ---------------
 
 echo ""
 echo ""
@@ -2425,7 +2476,7 @@ if is_service_enabled key; then
     echo "The password: $ADMIN_PASSWORD"
 fi
 
-# Echo HOST_IP - useful for build_uec.sh, which uses dhcp to give the instance an address
+# Echo ``HOST_IP`` - useful for ``build_uec.sh``, which uses dhcp to give the instance an address
 echo "This is your host ip: $HOST_IP"
 
 # Warn that ``EXTRA_FLAGS`` needs to be converted to ``EXTRA_OPTS``
@@ -2433,5 +2484,5 @@ if [[ -n "$EXTRA_FLAGS" ]]; then
     echo "WARNING: EXTRA_FLAGS is defined and may need to be converted to EXTRA_OPTS"
 fi
 
-# Indicate how long this took to run (bash maintained variable 'SECONDS')
+# Indicate how long this took to run (bash maintained variable ``SECONDS``)
 echo "stack.sh completed in $SECONDS seconds."
