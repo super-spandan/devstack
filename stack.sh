@@ -1979,6 +1979,9 @@ fi
 
 # Only run the services specified in ``ENABLED_SERVICES``
 
+configure_glanceclient
+setup_develop $SWIFTCLIENT_DIR
+configure_keystoneclient
 # Launch the Glance services
 if is_service_enabled g-api g-reg; then
     echo_summary "Starting Glance"
@@ -2170,12 +2173,6 @@ fi
 # Override ``IMAGE_URLS`` with a comma-separated list of UEC images.
 #  * **oneiric**: http://uec-images.ubuntu.com/oneiric/current/oneiric-server-cloudimg-amd64.tar.gz
 #  * **precise**: http://uec-images.ubuntu.com/precise/current/precise-server-cloudimg-amd64.tar.gz
-
-#first re-install glance and swift client
-
-configure_glanceclient
-setup_develop $SWIFTCLIENT_DIR
-configure_keystoneclient
 
 if is_service_enabled g-api; then
 
