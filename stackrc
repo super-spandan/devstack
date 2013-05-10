@@ -41,7 +41,7 @@ CINDER_BRANCH=savi-1.1
 
 # volume client
 CINDERCLIENT_REPO=${GIT_BASE}/savi-dev/python-cinderclient
-CINDERCLIENT_BRANCH=savi-1.1
+CINDERCLIENT_BRANCH=master
 
 # compute service
 NOVA_REPO=${GIT_BASE}/savi-dev/nova.git
@@ -55,7 +55,7 @@ SWIFT3_BRANCH=master            # 10Jul2012: f216f1b4f2
 
 # python swift client library
 SWIFTCLIENT_REPO=${GIT_BASE}/savi-dev/python-swiftclient
-SWIFTCLIENT_BRANCH=savi-1.1
+SWIFTCLIENT_BRANCH=master
 
 # image catalog service
 GLANCE_REPO=${GIT_BASE}/savi-dev/glance.git
@@ -63,7 +63,7 @@ GLANCE_BRANCH=savi-1.1
 
 # python glance client library
 GLANCECLIENT_REPO=${GIT_BASE}/savi-dev/python-glanceclient
-GLANCECLIENT_BRANCH=savi-1.1
+GLANCECLIENT_BRANCH=master
 
 # unified auth system (manages accounts/tokens)
 KEYSTONE_REPO=${GIT_BASE}/savi-dev/keystone.git
@@ -79,15 +79,15 @@ HORIZON_BRANCH=savi-1.1
 
 # python client library to nova that horizon (and others) use
 NOVACLIENT_REPO=${GIT_BASE}/savi-dev/python-novaclient.git
-NOVACLIENT_BRANCH=savi-1.1
+NOVACLIENT_BRANCH=master
 
 # consolidated openstack python client
 OPENSTACKCLIENT_REPO=${GIT_BASE}/savi-dev/python-openstackclient.git
-OPENSTACKCLIENT_BRANCH=savi-1.1
+OPENSTACKCLIENT_BRANCH=master
 
 # python keystone client library to nova that horizon uses
 KEYSTONECLIENT_REPO=${GIT_BASE}/savi-dev/python-keystoneclient
-KEYSTONECLIENT_BRANCH=savi-1.1
+KEYSTONECLIENT_BRANCH=master
 
 # quantum service
 QUANTUM_REPO=${GIT_BASE}/savi-dev/quantum
