@@ -1335,6 +1335,7 @@ if is_service_enabled q-svc; then
     # Update either configuration file with plugin
     iniset $Q_CONF_FILE DEFAULT core_plugin $Q_PLUGIN_CLASS
     iniset $Q_CONF_FILE DEFAULT debug False
+    iniset $Q_CONF_FILE DEFAULT verbose False
 
     # set dns name server
     if [[ $DNS_NAME_SERVER ]]; then
@@ -1424,6 +1425,9 @@ fi
 # Quantum agent (for compute nodes)
 if is_service_enabled q-agt; then
     # Configure agent for plugin
+    Q_CONF_FILE=/etc/quantum/quantum.conf
+    iniset $Q_CONF_FILE DEFAULT debug False
+    iniset $Q_CONF_FILE DEFAULT verbose False
     if [[ "$Q_PLUGIN" = "openvswitch" || "$Q_PLUGIN" = "ryu" ]]; then
         # Setup integration bridge
         OVS_BRIDGE=${OVS_BRIDGE:-br-int}
@@ -1496,7 +1500,7 @@ if is_service_enabled q-dhcp; then
     cp $QUANTUM_DIR/etc/dhcp_agent.ini $Q_DHCP_CONF_FILE
 
     # Set verbose
-    iniset $Q_DHCP_CONF_FILE DEFAULT verbose True
+    iniset $Q_DHCP_CONF_FILE DEFAULT verbose False
     # Set debug
     iniset $Q_DHCP_CONF_FILE DEFAULT debug False
     iniset $Q_DHCP_CONF_FILE DEFAULT use_namespaces $Q_USE_NAMESPACE
@@ -1527,7 +1531,7 @@ if is_service_enabled q-l3; then
     cp $QUANTUM_DIR/etc/l3_agent.ini $Q_L3_CONF_FILE
 
     # Set verbose
-    iniset $Q_L3_CONF_FILE DEFAULT verbose True
+    iniset $Q_L3_CONF_FILE DEFAULT verbose False
     # Set debug
     iniset $Q_L3_CONF_FILE DEFAULT debug False
 
@@ -1927,9 +1931,9 @@ fi
 # All nova-compute workers need to know the vnc configuration options
 # These settings don't hurt anything if n-xvnc and n-novnc are disabled
 if is_service_enabled n-cpu; then
-    NOVNCPROXY_URL=${NOVNCPROXY_URL:-"http://$SERVICE_HOST:6080/vnc_auto.html"}
+    NOVNCPROXY_URL=${NOVNCPROXY_URL:-"http://$PUBLIC_SERVICE_HOST:6080/vnc_auto.html"}
     add_nova_opt "novncproxy_base_url=$NOVNCPROXY_URL"
-    XVPVNCPROXY_URL=${XVPVNCPROXY_URL:-"http://$SERVICE_HOST:6081/console"}
+    XVPVNCPROXY_URL=${XVPVNCPROXY_URL:-"http://$PUBLIC_SERVICE_HOST:6081/console"}
     add_nova_opt "xvpvncproxy_base_url=$XVPVNCPROXY_URL"
 fi
 if [ "$VIRT_DRIVER" = 'xenserver' ]; then

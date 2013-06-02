@@ -314,7 +314,8 @@ function init_nova() {
     fi
     if is_service_enabled cinder; then
         add_nova_opt "volume_api_class=nova.volume.cinder.API"
-        add_nova_opt "cinder_catalog_info=volume:cinder:internalURL:$REGION_NAME"
+#       add_nova_opt "cinder_catalog_info=volume:cinder:internalURL:$REGION_NAME"
+	add_nova_opt "cinder_endpoint_template=http://$CINDER_API:8776/v1/%(project_id)s"
     fi
     if [ -n "$NOVA_STATE_PATH" ]; then
         add_nova_opt "state_path=$NOVA_STATE_PATH"
