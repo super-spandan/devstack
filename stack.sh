@@ -375,7 +375,8 @@ if is_service_enabled fv; then
         # Generate database and configuration file
         echo "Generating FlowVisor database and config file (one-time process)."
         echo "Please press enter when prompted for the password"
-        sudo -u flowvisor fvconfig generate /etc/flowvisor/fv_config.json
+        #sudo -u flowvisor fvconfig generate /etc/flowvisor/fv_config.json
+        sudo fvconfig generate /etc/flowvisor/fv_config.json
     fi
 
     # Assuming FlowVisor installs to /etc/flowvisor directory...
@@ -952,9 +953,9 @@ if is_service_enabled ceilometer; then
     install_ceilometer
 fi
 if is_service_enabled ryu; then
-    if is_service_enabled janus; then
-        RYU_BRANCH=ryu2janus
-    fi
+#    if is_service_enabled janus; then
+#        RYU_BRANCH=ryu2janus
+#    fi
     git_clone $RYU_REPO $RYU_DIR $RYU_BRANCH
 fi
 if is_service_enabled whale; then
@@ -1465,10 +1466,11 @@ if is_service_enabled q-svc; then
         sudo rm -rf $RYU_CONF
 
         cat <<EOF > $RYU_CONF
---wsapi_host=$RYU_API_HOST
---wsapi_port=$RYU_API_PORT
---ofp_listen_host=$RYU_OFP_HOST
---ofp_tcp_listen_port=$RYU_OFP_PORT
+[DEFAULT]
+wsapi_host=$RYU_API_HOST
+wsapi_port=$RYU_API_PORT
+ofp_listen_host=$RYU_OFP_HOST
+ofp_tcp_listen_port=$RYU_OFP_PORT
 EOF
 
         #screen_it ryu "cd $RYU_DIR && $RYU_DIR/bin/ryu-manager --flagfile $RYU_CONF --app_lists ryu.app.rest,ryu.app.simple_demorunner"
@@ -1482,19 +1484,19 @@ EOF
             screen_it janus "cd $JANUS_DIR && $JANUS_DIR/bin/janus-init"
 
             cat << EOF >> $RYU_CONF
---janus_host=$JANUS_API_HOST
---janus_port=$JANUS_API_PORT
+janus_host=$JANUS_API_HOST
+janus_port=$JANUS_API_PORT
 EOF
-            screen_it ryu "cd $RYU_DIR && $RYU_DIR/bin/ryu-manager --flagfile $RYU_CONF --app_lists ryu.app.ofctl_rest,ryu.app.ryu2janus,ryu.app.discovery,ryu.app.rest_discovery"
+            screen_it ryu "cd $RYU_DIR && $RYU_DIR/bin/ryu-manager --verbose --observe-links --config-file $RYU_CONF --app-lists ryu.topology.event,ryu.topology.switches,ryu.app.ofctl_rest,ryu.app.ryu2janus,ryu.app.rest_topology"
             #screen_it ryu "cd $RYU_DIR && $RYU_DIR/bin/ryu-manager --flagfile $RYU_CONF --app_lists ryu.app.ofctl_rest,ryu.app.ryu2janus"
             sleep 5
         else
             cat << EOF >> $RYU_CONF
---fv_api_port=$RYU_FV_API_PORT
---fv_pass_file=$RYU_FV_PASSFILE
---fv_slice_default_pass=$RYU_FV_SLICE_PASS
---fv_default_slice=$RYU_FV_DEFAULT_SLICE
---api_db_url=$BASE_SQL_CONN/ryu?charset=utf8
+fv_api_port=$RYU_FV_API_PORT
+fv_pass_file=$RYU_FV_PASSFILE
+fv_slice_default_pass=$RYU_FV_SLICE_PASS
+fv_default_slice=$RYU_FV_DEFAULT_SLICE
+api_db_url=$BASE_SQL_CONN/ryu?charset=utf8
 EOF
 
             screen_it ryu "cd $RYU_DIR && $RYU_DIR/bin/ryu-manager --flagfile $RYU_CONF --app_lists ryu.app.rest,ryu.app.tr-edge-isolation"
@@ -2321,7 +2323,7 @@ fi
 
 # Start up FlowVisor and give it time to start up
 if is_service_enabled fv; then
-    screen_it fv "cd ~ && sudo -u flowvisor flowvisor -l $RYU_FV_CONFIG"
+    screen_it fv "cd ~ && sudo flowvisor -l $RYU_FV_CONFIG"
     sleep 3
 fi
 
