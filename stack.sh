@@ -1034,7 +1034,6 @@ if [[ $TRACK_DEPENDS = True ]] ; then
     exit 0
 fi
 
-
 # Syslog
 # ------
 
@@ -1053,7 +1052,39 @@ EOF
 EOF
         sudo mv /tmp/90-stack-s.conf /etc/rsyslog.d
     fi
-    echo_summary "Starting rsyslog"
+
+#TODO: Check if $LocalHostName Directive already exists
+if [[ $REMOTE_SYSLOG_SERVER != "False" ]]; then 
+	if [[ $SYSLOG_SERVER_IP != "" && $SYSLOG_SERVER_PORT != "" ]]; then 
+		if [[ $SYSLOG_PROTOCOL = "TCP" || $SYSLOG_PROTOCOL = "" ]]; then 
+		#Defaults to TCP
+			LOG_DIRECTIVE="*.* @@$SYSLOG_SERVER_IP:$SYSLOG_SERVER_PORT"
+		else
+			LOG_DIRECTIVE="*.* @$SYSLOG_SERVER_IP:$SYSLOG_SERVER_PORT"
+		fi	
+	else
+		LOG_DIRECTIVE="#*.* @@<<IP_ADDRESS>>:<<PORT>>"
+	fi
+
+	#Get new local hostname to use
+	if [[ -z $REGION_NAME ]]; then 
+		LONG_HOSTNAME="$HOSTNAME"
+	else
+		LONG_HOSTNAME="$REGION_NAME-$HOSTNAME"
+	fi
+	RSYSCONF_PATH="/etc/rsyslog.conf"
+	if [[ ! -f "$RSYSCONF_PATH.cp" ]]; then 
+		#Make a copy if it doesn't exist
+		sudo cp $RSYSCONF_PATH "$RSYSCONF_PATH.cp"  
+	fi
+   	sudo  cat <<EOF | sudo  tee -a  $RSYSCONF_PATH 
+
+\$LocalHostName $LONG_HOSTNAME
+#Uncomment/modify the following line to log to server at <<IP_ADDRESS>>:<<PORT>> 
+$LOG_DIRECTIVE
+EOF
+
+fi
     restart_service rsyslog
 fi
 
